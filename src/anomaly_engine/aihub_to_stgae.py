@@ -34,7 +34,11 @@ IMG_W, IMG_H = 1280, 720
 
 
 def clip_to_tsv(clip: Clip) -> list[str]:
-    """클립 → MAAD TSV 라인 리스트."""
+    """클립 → MAAD 7-column TSV 라인 리스트.
+
+    MAAD format: frame_id  track_id  agent_id  x  y  major_label  minor_label
+    MAADDataset uses col2=agent_id, col3:5=x,y, col[-2:]=labels.
+    """
     lines = []
     for frame in clip.frames:
         for v in frame.vehicles:
@@ -45,7 +49,9 @@ def clip_to_tsv(clip: Clip) -> list[str]:
             driving = v.get("DrivingType", "정상")
             major = 0 if driving in ("정상",) or "정상" in driving else 1
             minor = DRIVING_TO_MINOR.get(driving, -1)
-            lines.append(f"{frame.frame_idx}\t{vid}\t{cx:.6f}\t{cy:.6f}\t{major}\t{minor}")
+            lines.append(
+                f"{frame.frame_idx}\t{vid}\t{vid}\t{cx:.6f}\t{cy:.6f}\t{major}\t{minor}"
+            )
     return lines
 
 
@@ -53,36 +59,55 @@ def convert_dataset(
     label_root: Path,
     output_dir: Path,
     max_clips: int | None = None,
-    split: str = "val",
+    train_ratio: float = 0.8,
 ):
-    """전체 데이터셋을 STGAE 형식으로 변환."""
+    """전체 데이터셋을 STGAE 형식으로 변환.
+
+    STGAE autoencoder 학습 구조:
+    - train/ : 정상 클립 80% (autoencoder 학습)
+    - test/  : 정상 20% + 비정상 전체 (평가)
+    """
+    import random
+
     output_dir.mkdir(parents=True, exist_ok=True)
     clips = load_clips(label_root, max_clips=max_clips)
 
-    normal_dir = output_dir / split / "normal"
-    abnormal_dir = output_dir / split / "abnormal"
-    normal_dir.mkdir(parents=True, exist_ok=True)
-    abnormal_dir.mkdir(parents=True, exist_ok=True)
+    normal_clips = [c for c in clips if c.is_normal]
+    abnormal_clips = [c for c in clips if not c.is_normal]
 
-    stats = {"normal": 0, "abnormal": 0, "total_frames": 0}
+    random.seed(42)
+    random.shuffle(normal_clips)
+    split_idx = int(len(normal_clips) * train_ratio)
+    train_normal = normal_clips[:split_idx]
+    test_normal = normal_clips[split_idx:]
 
-    for clip in clips:
-        lines = clip_to_tsv(clip)
-        if not lines:
-            continue
+    train_dir = output_dir / "train"
+    test_dir = output_dir / "test"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
 
-        target_dir = normal_dir if clip.is_normal else abnormal_dir
-        label_key = "normal" if clip.is_normal else "abnormal"
-        stats[label_key] += 1
-        stats["total_frames"] += len(clip.frames)
+    stats = {"train_normal": 0, "test_normal": 0, "test_abnormal": 0, "total_frames": 0}
 
-        out_path = target_dir / f"{clip.clip_id}.txt"
-        with open(out_path, "w") as f:
-            f.write("\n".join(lines))
+    def _write_clips(clips_list, target_dir, stat_key):
+        for clip in clips_list:
+            lines = clip_to_tsv(clip)
+            if not lines:
+                continue
+            stats[stat_key] += 1
+            stats["total_frames"] += len(clip.frames)
+            out_path = target_dir / f"{clip.clip_id}.txt"
+            with open(out_path, "w") as f:
+                f.write("\n".join(lines))
 
-    print(f"변환 완료: {stats['normal']} 정상 + {stats['abnormal']} 비정상 클립")
-    print(f"총 프레임: {stats['total_frames']:,}")
-    print(f"저장 위치: {output_dir / split}")
+    _write_clips(train_normal, train_dir, "train_normal")
+    _write_clips(test_normal, test_dir, "test_normal")
+    _write_clips(abnormal_clips, test_dir, "test_abnormal")
+
+    print(f"변환 완료:")
+    print(f"  train: {stats['train_normal']} 정상 클립")
+    print(f"  test:  {stats['test_normal']} 정상 + {stats['test_abnormal']} 비정상 클립")
+    print(f"  총 프레임: {stats['total_frames']:,}")
+    print(f"  저장 위치: {output_dir}")
     return stats
 
 
