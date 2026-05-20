@@ -1,0 +1,253 @@
+"""MLLM 프롬프트 템플릿 — 4개 태스크."""
+import sys as _sys; from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+from config_new import VEHICLE_13CLASS
+
+# ── Task 1: 장면 이해 ────────────────────────────────────────────────
+
+SCENE_UNDERSTANDING_PROMPT = """\
+당신은 교통 CCTV 영상 분석 전문가입니다.
+
+아래는 현재 CCTV 영상에서 추출한 교통 상황 데이터입니다:
+- 위치: {ic_name} ({lane_count}차로, {road_type})
+- 검출 차량: {vehicle_count}대
+- 차종 분포: {class_distribution}
+- 평균 속도: {avg_speed} km/h
+- 트리거: {trigger_type} — {trigger_description}
+
+이 장면의 교통 상황을 분석하고 JSON으로 응답하시오:
+{{
+  "scene_description": "장면 설명",
+  "traffic_state": "free_flow | congested | incident | stopped",
+  "anomalies": ["이상 상황 목록"],
+  "risk_level": "low | medium | high | critical"
+}}"""
+
+# ── Task 2: 사고 감지 ────────────────────────────────────────────────
+
+ACCIDENT_DETECTION_PROMPT = """\
+당신은 교통사고 감지 전문가입니다.
+
+교통 상황 데이터:
+- 트리거: {trigger_type}
+- 관련 차량 궤적:
+  {track_summaries}
+- TTC: {ttc_values}
+- 속도 변화: {speed_changes}
+
+사고 발생 여부를 판단하고 JSON으로 응답하시오:
+{{
+  "accident_detected": true/false,
+  "confidence": 0.0~1.0,
+  "accident_type": "rear_end | sideswipe | rollover | head_on | fixed_object | none",
+  "severity": "minor | moderate | severe | fatal",
+  "involved_vehicles": [{{"track_id": N, "role": "striking|struck|..."}}],
+  "timestamp_estimated": "HH:MM:SS",
+  "reasoning": "판단 근거 설명"
+}}"""
+
+# ── Task 3: 차종 분류 보정 ───────────────────────────────────────────
+
+# 13종 분류 체계 텍스트 (프롬프트 삽입용)
+_CLASS_TABLE = """한국도로공사 13종 분류 체계 (차축 기반):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1단위(단일차체):
+  T1  = 승용차·미니트럭 (2축, 소형)
+  T2  = 버스 (2축, 창문 다수)
+  T3  = 소형화물 1~2.5t 미만 (2축, 포터/봉고급)
+  T4  = 중형화물 2.5~8.5t 미만 (2축, 마이티급)
+  T5  = 대형화물 8.5t+ (3축, 후축 복륜)
+  T6  = 대형특수 (4축, 레미콘/대형덤프)
+  T7  = 대형특수 (5축)
+
+2단위(트랙터+트레일러 또는 트럭+트레일러):
+  T8  = 세미트레일러 (4축)
+  T9  = 풀트레일러 (4축)
+  T10 = 세미트레일러 (5축, 40ft 컨테이너)
+  T11 = 풀트레일러 (5축)
+  T12 = 세미트레일러 (6축, 초대형)
+
+이륜:
+  T13 = 이륜차 (오토바이, 스쿠터)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+CLASS_CORRECTION_PROMPT = f"""\
+당신은 한국도로공사 교통량조사 차종분류 전문가입니다.
+
+Vision 모델의 1차 분류 결과: {{vision_class}} (신뢰도: {{confidence}})
+차량 메타데이터: bbox 면적 {{area}}px², 종횡비 {{aspect_ratio}}
+
+{_CLASS_TABLE}
+
+판단 순서:
+1) 2단위(연결부 꺾임) 여부 → T8~T12
+2) 이륜(2륜, 매우 작음) → T13
+3) 창문 패턴(승객용) → T2(버스)
+4) 적재함 유무·축 수로 T1/T3~T7 구분
+
+JSON으로 응답:
+{{{{
+  "corrected_class": "T코드",
+  "confidence": 0.0~1.0,
+  "unit_count": 1 | 2,
+  "axle_count": 2~6,
+  "vision_agreed": true/false,
+  "reasoning": "판단 근거 (차축, 차체형태, 크기 기반)"
+}}}}"""
+
+# ── Task 4: 사고 원인 추론 + 보고서 (93컬럼) ────────────────────────
+
+REPORT_GENERATION_PROMPT = """\
+당신은 교통사고 분석 전문가입니다. 한국도로공사 사고보고서 표준 서식에 맞춰 분석합니다.
+
+사고 상황 데이터:
+- CCTV 위치: {ic_name} ({road_name}, {direction}방향, 이정 {km}km)
+- 사고 유형: {accident_type}
+- 관련 차량:
+  {involved_vehicles_detail}
+- 사고 전 30초 교통류:
+  {pre_accident_traffic}
+- 기상: {weather}
+- 유사 과거 사고 사례:
+  {similar_cases}
+
+도로공사 사고보고서 표준 서식(93컬럼)에 맞춰 JSON으로 작성하시오.
+CCTV 영상에서 판단 가능한 항목만 채우고, 현장 확인 필요 항목은 null로 표기:
+
+{{
+  "시간": {{
+    "사고접보 시각(날짜)": "YYYY. M. D",
+    "사고접보 시각(요일)": "월~일",
+    "사고접보 시각(시간)": "HH:MM",
+    "안전순찰발 도착시각": null,
+    "119 도착시각": null,
+    "사고처리 완료시간": null
+  }},
+  "위치": {{
+    "노선명": "{road_name}",
+    "방향": "{direction}",
+    "이정": {km},
+    "사고 관할 지사": "{branch}",
+    "사고지점 유형": "JC | IC | 터널 | 본선 | 진출입"
+  }},
+  "사고 특성": {{
+    "기상": "맑음 | 흐림 | 비 | 눈 | 안개",
+    "접보 유형": "CCTV",
+    "사고 유형": "부분차단 | 전면차단 | 갓길",
+    "사고원인": "주시태만 | 졸음운전 | 과속 | 안전거리 미확보 | 차로변경 | 기타",
+    "화재 여부": "미발생 | 화재",
+    "차량 전복/전도 여부": "미 전복/전도 | 전복 | 전도",
+    "적재물 유출 여부": "미 유출 | 유출",
+    "적재물 유형_1": null
+  }},
+  "피해차량": {{
+    "피해차량_1": "승용차 | 화물차 | 버스 | 승합차",
+    "피해차량_2": "...",
+    "피해차량_N": "... (최대 10대)"
+  }},
+  "인명피해": {{
+    "인명피해(총수)": null,
+    "사망자수": null,
+    "중상자수": null,
+    "경상자수": null
+  }},
+  "차로 피해": {{
+    "일방향 여부": "일방 | 양방",
+    "사고방향 피해 차로_1": "유 | 무",
+    "사고방향 피해 차로_2": "유 | 무",
+    "사고방향 피해 차로_3": "유 | 무",
+    "사고방향 피해 차로_갓길": "유 | 무"
+  }},
+  "교통 영향": {{
+    "정체길이": "km (정수)",
+    "도로피해_1": "차로명",
+    "시설물 피해_1": null
+  }},
+  "추론": {{
+    "cause_primary": "주 원인",
+    "cause_contributing": ["기여 요인 목록"],
+    "narrative": "사고 경위 서술 (3~5문장)",
+    "recommendations": ["재발 방지 권고사항"],
+    "confidence": 0.0~1.0,
+    "reasoning": "MLLM 판단 근거"
+  }}
+}}"""
+
+# ── 시스템 프롬프트 ──────────────────────────────────────────────────
+
+_SYSTEM_PROMPTS: dict[str, str] = {
+    "scene": (
+        "당신은 교통 CCTV 영상 분석 전문가입니다. "
+        "제공된 키프레임 이미지와 메타데이터를 기반으로 현재 교통 상황을 정확히 분석합니다. "
+        "반드시 JSON 형식으로만 응답하시오."
+    ),
+    "accident": (
+        "당신은 교통사고 감지 전문가입니다. "
+        "CCTV 키프레임과 차량 궤적 데이터를 분석하여 사고 발생 여부를 정밀 판단합니다. "
+        "반드시 JSON 형식으로만 응답하시오."
+    ),
+    "classify": (
+        "당신은 한국도로공사 교통량조사 차종분류 전문가입니다. "
+        "Vision 모델의 1차 분류를 검증하고, 차축 수와 차체 형태를 기반으로 "
+        "한국도로공사 13종(T1~T13) 분류 체계에 맞게 보정합니다. "
+        "반드시 JSON 형식으로만 응답하시오."
+    ),
+    "report": (
+        "당신은 교통사고 분석 전문가입니다. "
+        "한국도로공사 사고보고서 표준 서식(93컬럼)에 맞춰 사고 원인을 추론하고 보고서를 작성합니다. "
+        "CCTV에서 판단 가능한 항목만 채우고, 현장 확인 필요 항목은 null로 표기하시오. "
+        "반드시 JSON 형식으로만 응답하시오."
+    ),
+}
+
+# 태스크 → 프롬프트 템플릿 매핑
+_TASK_PROMPTS: dict[str, str] = {
+    "scene": SCENE_UNDERSTANDING_PROMPT,
+    "accident": ACCIDENT_DETECTION_PROMPT,
+    "classify": CLASS_CORRECTION_PROMPT,
+    "report": REPORT_GENERATION_PROMPT,
+}
+
+
+def build_messages(
+    task: str,
+    images: list | None = None,
+    metadata: dict | None = None,
+) -> list[dict]:
+    """태스크별 프롬프트를 메시지 리스트로 조립.
+
+    Args:
+        task: "scene" | "accident" | "classify" | "report"
+        images: 키프레임 이미지 리스트 (numpy 또는 base64).
+        metadata: 프롬프트 플레이스홀더에 채울 메타데이터.
+
+    Returns:
+        OpenAI 호환 messages 리스트.
+    """
+    if task not in _TASK_PROMPTS:
+        valid = ", ".join(_TASK_PROMPTS)
+        raise ValueError(f"알 수 없는 태스크: {task} (유효: {valid})")
+
+    meta = metadata or {}
+    template = _TASK_PROMPTS[task]
+
+    # 메타데이터로 플레이스홀더 채우기 (누락 키는 빈 문자열)
+    try:
+        user_text = template.format_map(_SafeDict(meta))
+    except (KeyError, IndexError):
+        user_text = template
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPTS[task]},
+        {"role": "user", "content": user_text},
+    ]
+
+    return messages
+
+
+class _SafeDict(dict):
+    """format_map에서 누락 키를 빈 문자열로 대체."""
+
+    def __missing__(self, key: str) -> str:
+        return ""

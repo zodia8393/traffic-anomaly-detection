@@ -1,0 +1,136 @@
+# 이상징후 탐지 규칙 정의 (Level 1)
+#
+# 코드 변경 없이 이 파일만 수정하여 규칙 튜닝 가능.
+# 임계값은 교통공학 도메인 지식 기반 초기값이며,
+# AI Hub 데이터 보정 후 업데이트 예정.
+#
+# type: single  — 개별 차량 특징 기반
+#       pair    — 두 차량 관계 기반
+#       group   — 다수 차량 집단 기반
+#       special — 커스텀 핸들러
+#
+# severity: CRITICAL > HIGH > MEDIUM > LOW
+#
+# feature: feature_store.py의 15차원 특징 인덱스명
+#   speed_kmh(0), acceleration(1), heading(2), heading_change(3),
+#   heading_deviation(4), lateral_speed(5), ttc_min(6), gap_front(7),
+#   gap_rear(8), speed_diff_flow(9), stop_duration(10),
+#   area_change_rate(11), aspect_ratio(12), track_age(13),
+#   neighbor_count(14)
+
+version: "1.0"
+
+rules:
+  - id: R1
+    name: sudden_braking
+    label: 급정거
+    severity: HIGH
+    type: single
+    feature: acceleration
+    operator: "<="
+    threshold: -6.0        # m/s^2 (약 0.6G)
+    filters:
+      min_track_age: 5
+      min_speed: 20.0      # 저속 차량 제외 (km/h)
+
+  - id: R2
+    name: wrong_way
+    label: 역주행
+    severity: CRITICAL
+    type: single
+    feature: heading_deviation
+    operator: ">="
+    threshold: 150.0       # degrees (거의 반대 방향)
+    filters:
+      min_track_age: 10
+      persistence: 3       # 3프레임 연속 시에만 (노이즈 방지)
+
+  - id: R3
+    name: long_stop
+    label: 장기정지
+    severity: MEDIUM
+    type: single
+    feature: stop_duration
+    operator: ">="
+    threshold: 30.0        # 초
+    filters:
+      min_track_age: 30
+
+  - id: R4
+    name: ttc_critical
+    label: TTC 임계
+    severity: HIGH
+    type: pair
+    feature: ttc_min
+    operator: "<="
+    threshold: 3.0         # 초
+
+  - id: R5
+    name: sudden_lane_change
+    label: 급차로변경
+    severity: HIGH
+    type: single
+    feature: lateral_speed
+    operator: ">="
+    threshold: 3.0         # px/frame (횡방향 이동)
+    filters:
+      min_track_age: 5
+      min_speed: 30.0
+
+  - id: R6
+    name: pedestrian_on_road
+    label: 보행자 차도 진입
+    severity: CRITICAL
+    type: special
+    handler: pedestrian_road_intrusion
+    filters:
+      min_track_age: 3
+
+  - id: R7
+    name: slow_wrong_direction
+    label: 역방향 저속
+    severity: MEDIUM
+    type: single
+    conditions:
+      - feature: heading_deviation
+        operator: ">="
+        threshold: 120.0
+      - feature: speed_kmh
+        operator: "<="
+        threshold: 20.0
+    filters:
+      min_track_age: 10
+
+  - id: R8
+    name: sudden_acceleration
+    label: 급가속
+    severity: LOW
+    type: single
+    feature: acceleration
+    operator: ">="
+    threshold: 4.0         # m/s^2
+    filters:
+      min_track_age: 5
+
+  - id: R9
+    name: cluster_braking
+    label: 군집 급감속
+    severity: CRITICAL
+    type: group
+    feature: acceleration
+    operator: "<="
+    threshold: -4.0        # m/s^2
+    min_count: 3           # 3대 이상 동시
+    spatial_radius: 200.0  # px 범위 내
+
+  - id: R10
+    name: approach_stopped
+    label: 정지 차량 접근
+    severity: HIGH
+    type: pair
+    handler: approach_stopped_vehicle
+    params:
+      stop_speed: 5.0      # 정지 판정 기준 (km/h)
+      ttc_threshold: 5.0   # 접근 TTC 기준 (초)
+    filters:
+      min_track_age: 5
