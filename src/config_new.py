@@ -57,7 +57,7 @@ TRIGGER_PERIODIC_INTERVAL = 300    # 초 (5분)
 TRIGGER_COOLDOWN_SEC = 30.0        # 동일 유형 재발 무시 시간
 
 # ── MLLM 설정 ────────────────────────────────────────────────────────
-MLLM_BACKEND = "llama_cpp"         # "llama_cpp" | "openai_api"
+MLLM_BACKEND = "transformers"      # "llama_cpp" | "openai_api" | "transformers"
 MLLM_MODEL_PATH = str(MODEL_DIR / "mllm" / "qwen2.5-vl-7b-q4.gguf")
 MLLM_API_URL = "http://localhost:8080/v1"
 MLLM_MAX_TOKENS = 2048

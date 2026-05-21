@@ -11,8 +11,8 @@ from typing import Any
 import numpy as np
 
 from config_new import L3_ACCIDENTS
-from mllm_client import MLLMClient
-from prompts import build_messages
+from .mllm_client import MLLMClient
+from .prompts import build_messages
 
 logger = logging.getLogger(__name__)
 

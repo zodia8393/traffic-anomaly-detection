@@ -1,0 +1,49 @@
+{
+  "clip": "p01_20230107_141213_an7_026_04",
+  "trigger": {
+    "type": "T3",
+    "frame_idx": 5,
+    "description": "정지차량 track=3 3s",
+    "severity": 0.3333333333333333
+  },
+  "keyframe_indices": [
+    1,
+    5,
+    9,
+    10,
+    14
+  ],
+  "mllm_latency_sec": 59.4,
+  "mllm_response": {
+    "content": {
+      "scene": "고속도로의 중간부분에서 차량들이 정지하고 있는 장면입니다.",
+      "anomaly": true,
+      "anomaly_type": "정지차량",
+      "vehicles": [
+        {
+          "type": "차종",
+          "color": "색상",
+          "behavior": "행동"
+        },
+        {
+          "type": "차종",
+          "color": "색상",
+          "behavior": "행동"
+        },
+        {
+          "type": "차종",
+          "color": "색상",
+          "behavior": "행동"
+        }
+      ],
+      "severity": "high",
+      "confidence": 0.95
+    },
+    "usage": {
+      "prompt_tokens": 1355,
+      "completion_tokens": 160,
+      "total_tokens": 1515
+    },
+    "latency_sec": 59.38514205394313
+  }
+}

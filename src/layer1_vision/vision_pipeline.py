@@ -21,10 +21,10 @@ import cv2
 import numpy as np
 
 from config_new import VEHICLE_13CLASS, L1_KEYFRAMES, L1_PACKAGES
-from keyframe_selector import select_keyframes
-from speed_estimator import SpeedEstimator
-from trigger_detector import TriggerDetector, TriggerEvent
-from ttc_calculator import compute_all_ttc
+from .keyframe_selector import select_keyframes
+from .speed_estimator import SpeedEstimator
+from .trigger_detector import TriggerDetector, TriggerEvent
+from .ttc_calculator import compute_all_ttc
 
 # AnomalyEngine: 선택적 의존성 — 없어도 기존 파이프라인 동작
 try:
