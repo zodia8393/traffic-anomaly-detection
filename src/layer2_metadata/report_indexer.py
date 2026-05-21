@@ -14,7 +14,7 @@ import numpy as np
 from openpyxl import load_workbook
 
 from config_new import DUCKDB_PATH
-from db_schema import init_db
+from .db_schema import init_db
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from typing import Any
 import duckdb
 
 from config_new import DUCKDB_PATH, L2_EXPORTS
-from db_schema import init_db
+from .db_schema import init_db
 
 logger = logging.getLogger(__name__)
 

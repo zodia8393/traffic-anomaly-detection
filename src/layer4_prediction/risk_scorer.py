@@ -11,7 +11,7 @@ from pathlib import Path
 import duckdb
 
 from config_new import DUCKDB_PATH, L4_RISK_REPORTS
-from feature_engineer import FeatureEngineer, FEATURE_NAMES
+from .feature_engineer import FeatureEngineer, FEATURE_NAMES
 
 logger = logging.getLogger(__name__)
 
