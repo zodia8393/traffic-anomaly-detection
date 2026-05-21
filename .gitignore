@@ -2,3 +2,32 @@ models/
 __pycache__/
 *.pkl
 *.pt
+*.pth
+*.onnx
+*.h5
+
+# Data
+data/
+external/
+*.parquet
+*.csv.gz
+*.npz
+*.npy
+
+# Binary docs (keep .md only)
+*.pdf
+*.pptx
+*.png
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

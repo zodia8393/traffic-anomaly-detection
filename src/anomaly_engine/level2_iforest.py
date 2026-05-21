@@ -123,5 +123,5 @@ def train_and_evaluate(
 
 if __name__ == "__main__":
     label_root = Path("/DATA/aihub_71566/labels/val_extracted")
-    model_dir = Path("/workspace/CCTV차종분류/사고분석_설계/models")
+    model_dir = Path("/workspace/prj_cctv/사고분석_설계/models")
     train_and_evaluate(label_root, model_dir)
