@@ -151,8 +151,8 @@ class MLLMClient:
             except json.JSONDecodeError:
                 pass
 
-        logger.warning("JSON 파싱 실패, raw text 반환")
-        return text
+        logger.warning("JSON 파싱 실패, 에러 마커 반환 (raw %d chars)", len(text))
+        return {"error": "json_parse_failed", "raw_length": len(text), "anomaly": None, "vehicles": []}
 
     # ── 핵심 API ─────────────────────────────────────────────────────
 
@@ -265,7 +265,7 @@ class MLLMClient:
         with torch.no_grad():
             output_ids = self._hf_model.generate(
                 **inputs,
-                max_new_tokens=max_tokens or MLLM_MAX_TOKENS,
+                max_new_tokens=min(max_tokens or MLLM_MAX_TOKENS, 512),
                 temperature=temperature if temperature is not None else MLLM_TEMPERATURE,
                 do_sample=(temperature or MLLM_TEMPERATURE) > 0,
             )

@@ -1,0 +1,313 @@
+[
+  {
+    "video_id": "N1_p01_20221026_183003_n1_003_03",
+    "clip": "p01_20221026_183003_n1_003_03",
+    "frames": 30,
+    "tracks": 1,
+    "triggers": 0,
+    "trigger_types": [],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      true
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 61.47938014101237,
+    "label": "N1",
+    "category": "01.방향지시등 이행 차선변경",
+    "is_abnormal": false,
+    "elapsed_sec": 62.6
+  },
+  {
+    "video_id": "N2_p10_20221028_180218_n2_178_03",
+    "clip": "p10_20221028_180218_n2_178_03",
+    "frames": 32,
+    "tracks": 0,
+    "triggers": 0,
+    "trigger_types": [],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 56.50145368371159,
+    "label": "N2",
+    "category": "02.실선구간 정상주행",
+    "is_abnormal": false,
+    "elapsed_sec": 57.6
+  },
+  {
+    "video_id": "N3_p01_20221212_183001_n3_097_05",
+    "clip": "p01_20221212_183001_n3_097_05",
+    "frames": 51,
+    "tracks": 3,
+    "triggers": 0,
+    "trigger_types": [],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 68.66905956715345,
+    "label": "N3",
+    "category": "03.정상차로변경 주행",
+    "is_abnormal": false,
+    "elapsed_sec": 70.4
+  },
+  {
+    "video_id": "N4_p05_20221202_035001_n4_015_04",
+    "clip": "p05_20221202_035001_n4_015_04",
+    "frames": 40,
+    "tracks": 2,
+    "triggers": 2,
+    "trigger_types": [
+      "T3",
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 66.98363789310679,
+    "label": "N4",
+    "category": "04.차선물기의 정상주행",
+    "is_abnormal": false,
+    "elapsed_sec": 68.3
+  },
+  {
+    "video_id": "N5_p01_20221205_115005_n5_189_04",
+    "clip": "p01_20221205_115005_n5_189_04",
+    "frames": 42,
+    "tracks": 4,
+    "triggers": 1,
+    "trigger_types": [
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 56.836234908085316,
+    "label": "N5",
+    "category": "05.2개 차로 연속변경의 정상주행",
+    "is_abnormal": false,
+    "elapsed_sec": 58.3
+  },
+  {
+    "video_id": "N6_p08_20221004_085017_n6_097_03",
+    "clip": "p08_20221004_085017_n6_097_03",
+    "frames": 13,
+    "tracks": 12,
+    "triggers": 1,
+    "trigger_types": [
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      true
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 43.73302569799125,
+    "label": "N6",
+    "category": "06.정체구간 정상주행",
+    "is_abnormal": false,
+    "elapsed_sec": 44.2
+  },
+  {
+    "video_id": "N7_p01_20230102_194004_n7_077_05",
+    "clip": "p01_20230102_194004_n7_077_05",
+    "frames": 47,
+    "tracks": 3,
+    "triggers": 1,
+    "trigger_types": [
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 57.54358116397634,
+    "label": "N7",
+    "category": "07.안전거리 확보 차선변경",
+    "is_abnormal": false,
+    "elapsed_sec": 59.2
+  },
+  {
+    "video_id": "A1_p01_20221103_072002_an1_036_03",
+    "clip": "p01_20221103_072002_an1_036_03",
+    "frames": 32,
+    "tracks": 2,
+    "triggers": 1,
+    "trigger_types": [
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 55.943710294086486,
+    "label": "A1",
+    "category": "01.방향지시등 불이행",
+    "is_abnormal": true,
+    "elapsed_sec": 57.0
+  },
+  {
+    "video_id": "A2_p02_20221223_113007_an2_017_05",
+    "clip": "p02_20221223_113007_an2_017_05",
+    "frames": 54,
+    "tracks": 3,
+    "triggers": 2,
+    "trigger_types": [
+      "T3",
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 60.37880185106769,
+    "label": "A2",
+    "category": "02.실선구간 차선변경",
+    "is_abnormal": true,
+    "elapsed_sec": 62.3
+  },
+  {
+    "video_id": "A3_p01_20230103_084001_an3_043_06",
+    "clip": "p01_20230103_084001_an3_043_06",
+    "frames": 59,
+    "tracks": 10,
+    "triggers": 4,
+    "trigger_types": [
+      "T3",
+      "T1",
+      "T3",
+      "T1"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 57.94906660076231,
+    "label": "A3",
+    "category": "03.동시 차로변경",
+    "is_abnormal": true,
+    "elapsed_sec": 60.0
+  },
+  {
+    "video_id": "A4_p01_20230106_173005_an4_127_06",
+    "clip": "p01_20230106_173005_an4_127_06",
+    "frames": 55,
+    "tracks": 10,
+    "triggers": 3,
+    "trigger_types": [
+      "T3",
+      "T1",
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      true
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 73.14274624036625,
+    "label": "A4",
+    "category": "04.차선 물기",
+    "is_abnormal": true,
+    "elapsed_sec": 75.1
+  },
+  {
+    "video_id": "A5_p05_20220820_185010_an5_010_06",
+    "clip": "p05_20220820_185010_an5_010_06",
+    "frames": 63,
+    "tracks": 6,
+    "triggers": 2,
+    "trigger_types": [
+      "T3",
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      false
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 38.88364540832117,
+    "label": "A5",
+    "category": "05.2개 차로 연속 변경",
+    "is_abnormal": true,
+    "elapsed_sec": 40.7
+  },
+  {
+    "video_id": "A6_p03_20221224_150007_an6_001_04",
+    "clip": "p03_20221224_150007_an6_001_04",
+    "frames": 18,
+    "tracks": 11,
+    "triggers": 1,
+    "trigger_types": [
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      true
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 62.03256568778306,
+    "label": "A6",
+    "category": "06.정체구간 차선변경",
+    "is_abnormal": true,
+    "elapsed_sec": 62.8
+  },
+  {
+    "video_id": "A7_p01_20230107_141213_an7_026_04",
+    "clip": "p01_20230107_141213_an7_026_04",
+    "frames": 41,
+    "tracks": 10,
+    "triggers": 2,
+    "trigger_types": [
+      "T3",
+      "T3"
+    ],
+    "mllm_calls": 1,
+    "mllm_anomaly": [
+      true
+    ],
+    "mllm_vehicles_real": [
+      true
+    ],
+    "mllm_latency_avg": 56.2868137168698,
+    "label": "A7",
+    "category": "07.안전거리 미확보 차선변경",
+    "is_abnormal": true,
+    "elapsed_sec": 57.8
+  }
+]

@@ -88,6 +88,8 @@ class MetadataWriter:
         output_json = response_data.get("output_json")
         if output_json is not None and not isinstance(output_json, str):
             output_json = json.dumps(output_json, ensure_ascii=False)
+        if isinstance(output_json, str):
+            output_json = output_json.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
         sql = """
             INSERT OR REPLACE INTO mllm_responses (

@@ -47,18 +47,27 @@ class DummyClassifier:
         return ["T1"] * len(crops), [0.5] * len(crops)
 
 
-ACCIDENT_PROMPT = """이 CCTV 고속도로 영상을 분석하여 다음 JSON 형식으로 응답하세요.
-트리거 정보: {trigger_type} — {trigger_desc}
+SCENE_PROMPT = """You are a highway CCTV analyst. {trigger_info}
 
-응답 형식:
-{{
-  "scene": "장면 설명 (1~2문장)",
-  "anomaly": true/false,
-  "anomaly_type": "사고유형 (anomaly=true일 때만)",
-  "vehicles": [{{"type": "차종", "color": "색상", "behavior": "행동"}}],
-  "severity": "low/medium/high",
-  "confidence": 0.0~1.0
-}}"""
+IMPORTANT: Most highway footage shows NORMAL traffic. Lane changes are usually legal.
+A lane change is only a violation if it meets one of these criteria:
+- The vehicle crosses a SOLID white/yellow line (not dashed)
+- The vehicle changes lanes WITHOUT a turn signal blinking
+- Multiple vehicles change lanes simultaneously causing danger
+- A vehicle drifts across lane markings (straddling)
+- A vehicle changes 2+ lanes in one move
+- Unsafe merge with very short gap in heavy traffic
+
+Step 1 - Describe what you see: road type, weather, how many lanes, what each vehicle is doing.
+Step 2 - Check: are lane lines solid or dashed? Is any vehicle crossing them? Any turn signals visible?
+Step 3 - Judge: is this normal driving or a real violation?
+
+Output JSON:
+```json
+{{"scene": "step1 description", "anomaly": true/false, "anomaly_type": "type or null", "vehicles": [{{"type": "vehicle type", "color": "color", "behavior": "action"}}], "severity": "low/medium/high or null", "confidence": 0.0-1.0}}
+```"""
+
+MIN_RESOLUTION = 480
 
 
 def load_frames(clip_dir: Path) -> list[tuple[int, np.ndarray]]:
@@ -77,11 +86,54 @@ def load_frames(clip_dir: Path) -> list[tuple[int, np.ndarray]]:
     return frames
 
 
-def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2) -> dict:
+def _upscale_if_small(img: np.ndarray) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) < MIN_RESOLUTION:
+        scale = MIN_RESOLUTION / max(h, w)
+        new_w, new_h = round(w * scale), round(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+    return img
+
+
+def _get_multi_frames(frame_map: dict, trigger_frame: int, spread: int = 5) -> list[np.ndarray]:
+    """트리거 프레임 전후 spread 간격으로 3장 선택."""
+    sorted_idxs = sorted(frame_map.keys())
+    center_pos = min(range(len(sorted_idxs)), key=lambda i: abs(sorted_idxs[i] - trigger_frame))
+
+    positions = [
+        max(0, center_pos - spread),
+        center_pos,
+        min(len(sorted_idxs) - 1, center_pos + spread),
+    ]
+    seen = set()
+    unique_positions = []
+    for p in positions:
+        if p not in seen:
+            seen.add(p)
+            unique_positions.append(p)
+
+    imgs = []
+    for p in unique_positions:
+        img = frame_map[sorted_idxs[p]]
+        imgs.append(_upscale_if_small(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+    return imgs
+
+
+def _sanitize_content(content):
+    """MLLM 응답 content를 DB 저장 가능한 형태로 정제."""
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+        if len(content) > 2000:
+            content = content[:2000]
+    return content
+
+
+def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2,
+        force_trigger: bool = False, mllm: MLLMClient | None = None) -> dict:
     """단일 클립 E2E 처리.
 
-    Returns:
-        결과 요약 dict.
+    Args:
+        mllm: 외부에서 생성한 MLLMClient 인스턴스 (싱글턴 재사용).
     """
     frames = load_frames(clip_dir)
     if not frames:
@@ -153,34 +205,53 @@ def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2) -> dict:
             "avg_speed": avg_speed,
             "trajectory": None,
         })
-    n_tracks = writer.write_tracks(video_id, tracks_data)
+    n_tracks = writer.write_tracks(video_id, tracks_data) if tracks_data else 0
     logger.info("L2 tracks 적재: %d건", n_tracks)
 
-    # ── L3: MLLM 호출 (트리거별, max_mllm_calls 제한) ────────────────
+    # ── L3: MLLM 호출 ──────────────────────────────────────────────────
     mllm_results = []
-    if all_triggers:
-        mllm = MLLMClient(backend="transformers")
+    triggers_to_process = all_triggers[:max_mllm_calls]
 
-        for i, trigger in enumerate(all_triggers[:max_mllm_calls]):
+    if not triggers_to_process and force_trigger:
+        from layer1_vision.trigger_detector import TriggerEvent
+        mid_idx = frames[len(frames) // 2][0]
+        triggers_to_process = [TriggerEvent(
+            type="T0", frame_idx=mid_idx, timestamp=mid_idx,
+            description="강제 분석 (트리거 미발화)", severity=0.0,
+        )]
+        logger.info("트리거 미발화 → 강제 MLLM 호출 (frame=%d)", mid_idx)
+
+    if triggers_to_process:
+        own_mllm = mllm is None
+        if own_mllm:
+            mllm = MLLMClient(backend="transformers")
+
+        for i, trigger in enumerate(triggers_to_process):
             trigger_frame = trigger.frame_idx
+
             img = frame_map.get(trigger_frame)
             if img is None:
                 closest = min(frame_map.keys(), key=lambda k: abs(k - trigger_frame))
                 img = frame_map[closest]
+            img_rgb = _upscale_if_small(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-            prompt = ACCIDENT_PROMPT.format(
-                trigger_type=trigger.type,
-                trigger_desc=trigger.description,
-            )
+            trigger_info = (f"Trigger: {trigger.type} — {trigger.description}"
+                           if trigger.type != "T0" else "Routine check (no trigger detected)")
+            prompt = SCENE_PROMPT.format(trigger_info=trigger_info)
             messages = [{"role": "user", "content": prompt}]
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
             logger.info("MLLM 호출 %d/%d: [%s] frame=%d...",
                         i + 1, min(len(all_triggers), max_mllm_calls),
                         trigger.type, trigger_frame)
-            response = mllm.chat(messages, images=[img_rgb])
+            try:
+                response = mllm.chat(messages, images=[img_rgb], max_tokens=512)
+            except Exception as e:
+                logger.error("MLLM 호출 실패 [%s] frame=%d: %s", trigger.type, trigger_frame, e)
+                continue
 
             response_id = f"resp_{video_id}_{trigger.type}_{trigger_frame}"
+            content = _sanitize_content(response.get("content"))
+
             mllm_data = {
                 "response_id": response_id,
                 "video_id": video_id,
@@ -188,16 +259,18 @@ def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2) -> dict:
                 "trigger_frame": trigger_frame,
                 "task": "accident_detection",
                 "input_summary": trigger.description,
-                "output_json": response.get("content"),
+                "output_json": content,
                 "latency_sec": response.get("latency_sec"),
                 "model_id": "Qwen2.5-VL-3B-Instruct",
                 "created_at": datetime.now(),
             }
-            writer.write_mllm_response(mllm_data)
+            try:
+                writer.write_mllm_response(mllm_data)
+            except Exception as e:
+                logger.error("MLLM 응답 DB 적재 실패: %s", e)
             mllm_results.append(mllm_data)
             logger.info("MLLM 응답 적재: %s (%.1fs)", response_id, response.get("latency_sec", 0))
 
-            content = response.get("content", {})
             if isinstance(content, dict) and content.get("anomaly"):
                 accident_data = {
                     "event_id": f"evt_{video_id}_{trigger_frame}",
@@ -209,10 +282,26 @@ def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2) -> dict:
                     "mllm_report_json": content,
                     "report_source": "CCTV_AUTO",
                 }
-                writer.write_accident(accident_data)
-                logger.info("사고 이벤트 적재: %s", accident_data["event_id"])
+                try:
+                    writer.write_accident(accident_data)
+                    logger.info("사고 이벤트 적재: %s", accident_data["event_id"])
+                except Exception as e:
+                    logger.error("사고 이벤트 DB 적재 실패: %s", e)
 
     # ── 결과 요약 ────────────────────────────────────────────────────
+    mllm_anomalies = []
+    mllm_vehicles = []
+    for r in mllm_results:
+        content = r.get("output_json", {})
+        if isinstance(content, dict):
+            mllm_anomalies.append(content.get("anomaly"))
+            vs = content.get("vehicles", [])
+            has_real = any(
+                isinstance(v, dict) and v.get("type", "차종") != "차종"
+                for v in (vs if isinstance(vs, list) else [])
+            )
+            mllm_vehicles.append(has_real)
+
     summary = {
         "video_id": video_id,
         "clip": clip_dir.name,
@@ -221,8 +310,10 @@ def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2) -> dict:
         "triggers": len(all_triggers),
         "trigger_types": [t.type for t in all_triggers],
         "mllm_calls": len(mllm_results),
+        "mllm_anomaly": mllm_anomalies,
+        "mllm_vehicles_real": mllm_vehicles,
         "mllm_latency_avg": (
-            np.mean([r["latency_sec"] for r in mllm_results if r.get("latency_sec")])
+            float(np.mean([r["latency_sec"] for r in mllm_results if r.get("latency_sec")]))
             if mllm_results else None
         ),
     }
@@ -234,10 +325,12 @@ def main():
     parser.add_argument("clip_dir", type=Path, help="PNG 프레임 디렉토리")
     parser.add_argument("--video-id", default=None, help="영상 식별자 (기본: 디렉토리명)")
     parser.add_argument("--max-mllm", type=int, default=2, help="최대 MLLM 호출 수")
+    parser.add_argument("--force-trigger", action="store_true",
+                        help="트리거 미발화 시에도 MLLM 강제 호출")
     args = parser.parse_args()
 
     video_id = args.video_id or args.clip_dir.name
-    summary = run(args.clip_dir, video_id, args.max_mllm)
+    summary = run(args.clip_dir, video_id, args.max_mllm, args.force_trigger)
 
     print("\n" + "=" * 60)
     print("E2E 파이프라인 결과")
