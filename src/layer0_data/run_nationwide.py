@@ -32,6 +32,7 @@ ACCIDENT_SRC = Path("/workspace/prj_cctv/사고분석_설계/src")
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 # ── 이중 config.py 충돌 해소 ────────────────────────────────────────
+# Phase 1: layer0_data/ 모듈 import (layer0_data/config.py 필요)
 sys.path.insert(0, str(_THIS_DIR))
 sys.path.insert(1, str(ACCIDENT_SRC))
 
@@ -45,14 +46,6 @@ from config import (
 )
 from track3_api_incident import IncidentEvent, ITSIncidentClient
 from track3_cctv_stream import CCTVInfo, ITSCCTVClient, _haversine
-
-import importlib.util as _ilu
-_spec = _ilu.spec_from_file_location("config", str(PIPELINE_SRC / "config.py"))
-_pipeline_cfg = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_pipeline_cfg)
-sys.modules["config"] = _pipeline_cfg
-sys.path.insert(0, str(PIPELINE_SRC))
-
 from config_new import (
     TIER2_HOTSPOT_COUNT,
     TIER3_MAX_CONCURRENT,
@@ -83,6 +76,14 @@ from run_realtime import (
     CONSENSUS_MIN_TYPES,
     INSTANT_RECORD_TYPES,
 )
+
+# Phase 2: config 교체 → pipeline/src (detector, tracker lazy import용)
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("config", str(PIPELINE_SRC / "config.py"))
+_pipeline_cfg = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_pipeline_cfg)
+sys.modules["config"] = _pipeline_cfg
+sys.path.insert(0, str(PIPELINE_SRC))
 
 logger = logging.getLogger(__name__)
 
