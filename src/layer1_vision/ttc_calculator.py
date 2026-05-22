@@ -73,13 +73,34 @@ def compute_ttc(
     return dist_curr / closing_speed
 
 
+def _is_same_lane(
+    hist_a: list[dict[str, Any]],
+    hist_b: list[dict[str, Any]],
+    overlap_threshold: float = 0.3,
+) -> bool:
+    """최근 bbox의 X축 겹침으로 같은 차선 여부 추정."""
+    ba = hist_a[-1]["bbox"]
+    bb = hist_b[-1]["bbox"]
+
+    x_overlap = max(0.0, min(ba[2], bb[2]) - max(ba[0], bb[0]))
+    w_a = ba[2] - ba[0]
+    w_b = bb[2] - bb[0]
+    min_w = min(w_a, w_b)
+
+    if min_w <= 0:
+        return False
+    return (x_overlap / min_w) > overlap_threshold
+
+
 def compute_all_ttc(
     tracks: dict[int, list[dict[str, Any]]],
+    lane_filter: bool = True,
 ) -> list[dict[str, Any]]:
     """전체 트랙 페어의 TTC를 계산한다.
 
     Args:
         tracks: {tracker_id: [{"bbox": [...], "timestamp": float}, ...]}
+        lane_filter: True면 같은 차선(bbox X-overlap) 쌍만 계산.
 
     Returns:
         list of {"track_a": int, "track_b": int, "ttc": float}
@@ -89,6 +110,8 @@ def compute_all_ttc(
     active_ids = [tid for tid, history in tracks.items() if len(history) >= 2]
 
     for tid_a, tid_b in combinations(active_ids, 2):
+        if lane_filter and not _is_same_lane(tracks[tid_a], tracks[tid_b]):
+            continue
         ttc = compute_ttc(tracks[tid_a], tracks[tid_b])
         if ttc is not None:
             results.append({

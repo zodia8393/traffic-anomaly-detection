@@ -29,6 +29,8 @@ from config_new import (
     TRIGGER_SPEED_VAR_SIGMA,
     TRIGGER_STOP_DURATION,
     TRIGGER_STOP_SPEED,
+    TRIGGER_TTC_MIN,
+    TRIGGER_TTC_STREAK_MIN,
     TRIGGER_TTC_THRESHOLD,
 )
 
@@ -62,6 +64,9 @@ class TriggerDetector:
 
         # 역주행 기준 방향: {track_id: initial_direction_vector}
         self._initial_directions: dict[int, tuple[float, float]] = {}
+
+        # T1 TTC 연속 감지 카운터: {(track_a, track_b): 연속 프레임 수}
+        self._ttc_streak: dict[tuple[int, int], int] = {}
 
         # 마지막 주기적 트리거 시각
         self._last_periodic: float = 0.0
@@ -109,7 +114,7 @@ class TriggerDetector:
         """쿨다운 타이머 갱신."""
         self._last_fired[trigger_type] = timestamp
 
-    # ── T1: TTC 임계값 이하 ──────────────────────────────────────────
+    # ── T1: TTC 임계값 이하 (연속성 필터 적용) ───────────────────────
 
     def _check_ttc(
         self, frame_idx: int, timestamp: float,
@@ -118,19 +123,39 @@ class TriggerDetector:
         if not self._is_cooled_down("T1", timestamp):
             return []
 
+        current_pairs: set[tuple[int, int]] = set()
+
         for entry in ttc_list:
             if entry["ttc"] <= TRIGGER_TTC_THRESHOLD:
-                severity = max(0.0, 1.0 - entry["ttc"] / TRIGGER_TTC_THRESHOLD)
-                event = TriggerEvent(
-                    type="T1",
-                    frame_idx=frame_idx,
-                    timestamp=timestamp,
-                    involved_tracks=[entry["track_a"], entry["track_b"]],
-                    severity=severity,
-                    description=f"TTC={entry['ttc']:.1f}s (임계={TRIGGER_TTC_THRESHOLD}s)",
-                )
-                self._fire("T1", timestamp)
-                return [event]
+                if entry["ttc"] < TRIGGER_TTC_MIN:
+                    continue
+
+                pair = (min(entry["track_a"], entry["track_b"]),
+                        max(entry["track_a"], entry["track_b"]))
+                current_pairs.add(pair)
+                self._ttc_streak[pair] = self._ttc_streak.get(pair, 0) + 1
+
+                if self._ttc_streak[pair] >= TRIGGER_TTC_STREAK_MIN:
+                    severity = max(0.0, 1.0 - entry["ttc"] / TRIGGER_TTC_THRESHOLD)
+                    event = TriggerEvent(
+                        type="T1",
+                        frame_idx=frame_idx,
+                        timestamp=timestamp,
+                        involved_tracks=[entry["track_a"], entry["track_b"]],
+                        severity=severity,
+                        description=(
+                            f"TTC={entry['ttc']:.1f}s (임계={TRIGGER_TTC_THRESHOLD}s)"
+                            f" 연속{self._ttc_streak[pair]}f"
+                        ),
+                    )
+                    self._fire("T1", timestamp)
+                    del self._ttc_streak[pair]
+                    return [event]
+
+        for pair in list(self._ttc_streak):
+            if pair not in current_pairs:
+                del self._ttc_streak[pair]
+
         return []
 
     # ── T2: 급감속 (개별) ────────────────────────────────────────────

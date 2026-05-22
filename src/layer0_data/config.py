@@ -46,11 +46,18 @@ EXKOR_BASE = "http://data.ex.co.kr/openapi"
 # 2) ITS 돌발상황정보 + CCTV — its.go.kr, 쿼리 apiKey=  (핵심 채널)
 ITS_BASE = "https://openapi.its.go.kr:9443"
 
-# ── Ring Buffer 설정 ─────────────────────────────────────────────────
+# ── Ring Buffer 설정 (legacy — OnDemandRecorder로 대체) ───────────────
 RING_BUFFER_PRE_SEC = 60       # 사고 전 보관 (초)
 RING_BUFFER_POST_SEC = 120     # 사고 후 녹화 (초)
 RING_BUFFER_FPS = 15           # 버퍼 FPS (원본 대비 절반)
 MAX_CONCURRENT_STREAMS = 4     # 동시 모니터링 카메라 수
+
+# ── OnDemand 녹화 설정 (징조 기반) ───────────────────────────────────
+RECORD_DURATION_MIN_SEC = 180   # 최소 녹화 시간 (3분)
+RECORD_DURATION_MAX_SEC = 300   # 최대 녹화 시간 (5분)
+RECORD_EXTEND_SEC = 60          # 추가 트리거 시 연장 (1분)
+RECORD_COOLDOWN_SEC = 600       # 동일 CCTV 재녹화 쿨다운 (10분)
+ITS_VERIFY_DELAY_SEC = 30       # 녹화 종료 후 ITS 확인 대기 (30초)
 
 # ── 영상 품질 게이트 ─────────────────────────────────────────────────
 MIN_RESOLUTION = (640, 480)

@@ -45,16 +45,22 @@ VEHICLE_13CLASS = {
 }
 
 # ── 트리거 임계값 ────────────────────────────────────────────────────
-TRIGGER_TTC_THRESHOLD = 3.0        # 초
+TRIGGER_TTC_THRESHOLD = 2.0        # 초 (v3: 3.0 → v4: 2.0)
 TRIGGER_DECEL_THRESHOLD = -3.0     # m/s^2
 TRIGGER_STOP_SPEED = 5.0           # km/h
-TRIGGER_STOP_DURATION = 3.0        # 초
+TRIGGER_STOP_DURATION = 10.0       # 초
 TRIGGER_MULTI_DECEL_COUNT = 3      # 대
 TRIGGER_SPEED_VAR_SIGMA = 2.0      # 배수
 TRIGGER_PERIODIC_INTERVAL = 300    # 초 (5분)
 
 # 트리거 쿨다운
-TRIGGER_COOLDOWN_SEC = 30.0        # 동일 유형 재발 무시 시간
+TRIGGER_COOLDOWN_SEC = 60.0        # 동일 유형 재발 무시 시간 (v3: 30 → v4: 60)
+TRIGGER_TTC_MIN = 0.5              # TTC < 이 값은 bbox 아티팩트 무시 (v3: 0.3 → v4: 0.5)
+TRIGGER_TTC_STREAK_MIN = 4         # 연속 N프레임 유지 시에만 T1 발화 (v3: 2 → v4: 4)
+
+# 다중 트리거 합의
+CONSENSUS_WINDOW_SEC = 5.0         # 합의 윈도우 (초)
+CONSENSUS_MIN_TYPES = 2            # 최소 트리거 종류 수
 
 # ── MLLM 설정 ────────────────────────────────────────────────────────
 MLLM_BACKEND = "transformers"      # "llama_cpp" | "openai_api" | "transformers"
@@ -78,6 +84,28 @@ ANOMALY_LOG_DIR = NEW_ROOT / "output" / "anomaly_logs"
 ANOMALY_CAMERA_CONFIGS = NEW_ROOT / "configs" / "cameras"
 ANOMALY_ALERT_THRESHOLD = 0.3
 ANOMALY_ALARM_THRESHOLD = 0.7
+
+# ── 전국 스케일업 (3-Tier) ────────────────────────────────────────────
+TIER2_HOTSPOT_COUNT = 50             # Tier 2 핫스팟 상시 정밀 감시 대수
+TIER3_MAX_CONCURRENT = 50            # Tier 3 동시 정밀 분석 최대 대수
+STREAM_SAMPLE_FPS = 1                # 전체 스트림 분석 fps
+STREAM_URL_REFRESH_SEC = 3600        # HLS URL 갱신 주기 (1시간)
+STREAM_RECONNECT_DELAY_SEC = 10      # 스트림 끊김 시 재연결 대기
+STREAM_MAX_FAILURES = 5              # 연속 실패 시 스트림 비활성화
+
+# 프리필터 (Tier 1)
+PREFILTER_FG_RATIO_LOW = 0.02        # MOG2 전경 비율 하한 (전체 정지)
+PREFILTER_FG_RATIO_HIGH = 0.40       # MOG2 전경 비율 상한 (급변)
+PREFILTER_FRAME_DIFF_THRESHOLD = 30  # 프레임 차분 평균 픽셀값 임계
+PREFILTER_HIST_DIFF_THRESHOLD = 0.4  # 히스토그램 상관계수 하한 (급변)
+PREFILTER_STATIC_DURATION_SEC = 10   # 정지 객체 지속 시간 (초)
+PREFILTER_COOLDOWN_SEC = 30          # 동일 카메라 Tier 3 승격 쿨다운
+PREFILTER_TIER3_HOLD_SEC = 60        # Tier 3 유지 시간 (정밀 분석 후 복귀)
+
+# ITS 사고 연동
+INCIDENT_POLL_SEC = 60               # ITS 돌발상황 폴링 주기
+INCIDENT_REACTOR_CCTVS = 3           # 사고 시 편입할 인근 CCTV 수
+INCIDENT_HOLD_SEC = 600              # 사고 편입 CCTV 유지 시간 (10분)
 
 # ── DuckDB ───────────────────────────────────────────────────────────
 DUCKDB_PATH = str(DATA_DIR / "accident.duckdb")
