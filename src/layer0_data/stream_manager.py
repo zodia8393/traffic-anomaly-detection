@@ -28,6 +28,7 @@ from run_realtime import FrameSampler
 from config_new import (
     STREAM_MAX_FAILURES,
     STREAM_RECONNECT_DELAY_SEC,
+    STREAM_REPROBE_SEC,
     STREAM_SAMPLE_FPS,
     STREAM_URL_REFRESH_SEC,
     TIER2_HOTSPOT_COUNT,
@@ -50,6 +51,7 @@ class WorkerStats:
     started_at: float = 0.0
     disabled: bool = False
     disabled_reason: str = ""
+    disabled_at: float = 0.0
 
 
 class StreamWorker:
@@ -86,6 +88,7 @@ class StreamWorker:
         self.stats.started_at = time.monotonic()
         self.stats.disabled = False
         self.stats.consecutive_failures = 0
+        self.stats.zero_frame_sessions = 0
         self._thread = threading.Thread(
             target=self._run,
             name=f"stream-{self.cctv.cctv_id[:20]}",
@@ -159,6 +162,7 @@ class StreamWorker:
                 self.stats.zero_frame_sessions += 1
                 if self.stats.zero_frame_sessions >= STREAM_MAX_FAILURES:
                     self.stats.disabled = True
+                    self.stats.disabled_at = time.monotonic()
                     self.stats.disabled_reason = (
                         f"연속 {self.stats.zero_frame_sessions}회 0프레임"
                     )
@@ -197,6 +201,7 @@ class StreamWorker:
         self.stats.consecutive_failures += 1
         if self.stats.consecutive_failures >= STREAM_MAX_FAILURES:
             self.stats.disabled = True
+            self.stats.disabled_at = time.monotonic()
             self.stats.disabled_reason = (
                 f"{reason} (연속 {self.stats.consecutive_failures}회)"
             )
@@ -486,20 +491,19 @@ class StreamManager:
             self.demote(cctv_id)
 
     def _retry_disabled(self):
-        """비활성화된 스트림 재시도 (5분마다 1회)."""
+        """비활성 카메라 재탐지 (STREAM_REPROBE_SEC마다)."""
+        now = time.monotonic()
+        to_retry = []
         with self._lock:
-            disabled_workers = [
-                w for w in self.streams.values()
-                if w.stats.disabled
-            ]
+            for w in self.streams.values():
+                if w.stats.disabled and (now - w.stats.disabled_at) >= STREAM_REPROBE_SEC:
+                    to_retry.append(w)
 
-        for worker in disabled_workers:
-            elapsed = time.monotonic() - worker.stats.started_at
-            # 최소 5분 경과 후 재시도
-            if elapsed < 300:
-                continue
+        if not to_retry:
+            return
 
-            logger.info(
-                "비활성 스트림 재시도: %s", worker.cctv.name
-            )
+        self.refresh_urls()
+        logger.info("비활성 카메라 재탐지: %d대 재시도", len(to_retry))
+
+        for worker in to_retry:
             worker.start()

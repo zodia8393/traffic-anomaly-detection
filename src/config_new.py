@@ -92,7 +92,8 @@ TIER3_MAX_CONCURRENT = 50            # Tier 3 동시 정밀 분석 최대 대수
 STREAM_SAMPLE_FPS = 1                # 전체 스트림 분석 fps
 STREAM_URL_REFRESH_SEC = 3600        # HLS URL 갱신 주기 (1시간)
 STREAM_RECONNECT_DELAY_SEC = 10      # 스트림 끊김 시 재연결 대기
-STREAM_MAX_FAILURES = 5              # 연속 실패 시 스트림 비활성화
+STREAM_MAX_FAILURES = 15             # 연속 실패 시 스트림 비활성화 (5→15, ITS HLS 간헐적 불안정 대응)
+STREAM_REPROBE_SEC = 1800            # 비활성 카메라 재탐지 주기 (30분)
 
 # 프리필터 (Tier 1)
 PREFILTER_FG_RATIO_LOW = 0.02        # MOG2 전경 비율 하한 (전체 정지)
