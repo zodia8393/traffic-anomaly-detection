@@ -48,6 +48,7 @@ from config import (
 from track3_api_incident import IncidentEvent, ITSIncidentClient
 from track3_cctv_stream import CCTVInfo, ITSCCTVClient, _haversine
 from config_new import (
+    NATIONWIDE_MAX_CAMERAS,
     TIER2_HOTSPOT_COUNT,
     TIER3_MAX_CONCURRENT,
     STREAM_SAMPLE_FPS,
@@ -160,7 +161,7 @@ class NationwidePipeline:
         self._trigger_windows: dict[str, list] = {}
         self._pending_triggers: dict[str, Any] = {}
         self._lock = threading.Lock()
-        self._max_cameras = max_cameras
+        self._max_cameras = max_cameras if max_cameras > 0 else NATIONWIDE_MAX_CAMERAS
 
         # 프로듀서-컨슈머 큐: Tier 2/3 프레임을 직렬화 처리
         self._frame_queue: queue.Queue = queue.Queue(
@@ -859,7 +860,7 @@ def main():
     p_start = sub.add_parser("start", help="전국 3-Tier 파이프라인 시작")
     p_start.add_argument(
         "--max-cameras", type=int, default=0,
-        help="테스트용 카메라 수 제한 (0=전체)",
+        help=f"카메라 수 제한 (0=기본값 {NATIONWIDE_MAX_CAMERAS}대)",
     )
 
     sub.add_parser("status", help="수집 현황 확인")
