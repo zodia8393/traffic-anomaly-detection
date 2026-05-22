@@ -176,9 +176,15 @@ class StreamWorker:
                     * (2 ** (self.stats.zero_frame_sessions - 1)),
                     300,
                 )
-                self._logger.warning(
+                n = self.stats.zero_frame_sessions
+                log_fn = (
+                    self._logger.warning
+                    if n in (1, STREAM_MAX_FAILURES // 2, STREAM_MAX_FAILURES - 1)
+                    else self._logger.debug
+                )
+                log_fn(
                     "0프레임 세션 %d/%d: %s — %.0fs 후 재시도",
-                    self.stats.zero_frame_sessions, STREAM_MAX_FAILURES,
+                    n, STREAM_MAX_FAILURES,
                     self.cctv.name, backoff,
                 )
                 self._stop_event.wait(backoff)

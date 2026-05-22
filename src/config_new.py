@@ -86,7 +86,7 @@ ANOMALY_ALERT_THRESHOLD = 0.3
 ANOMALY_ALARM_THRESHOLD = 0.7
 
 # ── 전국 스케일업 (3-Tier) ────────────────────────────────────────────
-NATIONWIDE_MAX_CAMERAS = 363         # 전체 가동 기본 상한 (ITS API 4700+대 중 고속도로 주요 CCTV)
+NATIONWIDE_MAX_CAMERAS = 1600        # 전체 가동 기본 상한 (RAM 40GB 기준, ITS 4760대 중)
 TIER2_HOTSPOT_COUNT = 50             # Tier 2 핫스팟 상시 정밀 감시 대수
 TIER3_MAX_CONCURRENT = 50            # Tier 3 동시 정밀 분석 최대 대수
 STREAM_SAMPLE_FPS = 1                # 전체 스트림 분석 fps

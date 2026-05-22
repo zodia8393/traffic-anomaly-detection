@@ -387,6 +387,11 @@ class OnDemandRecorder:
                     self._process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self._process.kill()
+            for fd in (self._process.stdin, self._process.stderr):
+                try:
+                    fd.close()
+                except Exception:
+                    pass
             self._process = None
 
         elapsed = time.monotonic() - self._started_at
@@ -402,6 +407,8 @@ class OnDemandRecorder:
             return True, output
 
         self._logger.warning("녹화 파일 없거나 비어있음: %s", output)
+        if output and output.exists() and output.stat().st_size == 0:
+            output.unlink()
         self._state = "idle"
         return True, None
 

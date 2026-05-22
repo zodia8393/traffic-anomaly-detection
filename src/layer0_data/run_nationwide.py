@@ -851,6 +851,9 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # 노이즈 억제: 개별 스트림/프레임/파이프라인 → 에러만 (요약 리포트에서 집계 확인)
+    for name in ("run_realtime", "stream", "layer1_vision.vision_pipeline"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
     parser = argparse.ArgumentParser(
         description="전국 363대 CCTV 3-Tier 통합 파이프라인",
