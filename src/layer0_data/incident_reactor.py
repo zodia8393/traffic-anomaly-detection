@@ -67,7 +67,11 @@ class IncidentReactor:
             self._stop_event.wait(INCIDENT_POLL_SEC)
 
     def _react(self, incident: IncidentEvent):
-        """사고에 대해 인근 CCTV를 Tier 3으로 승격."""
+        """사고에 대해 인근 CCTV를 Tier 3으로 승격.
+
+        find_nearest 결과를 StreamManager에 로드된 CCTV로 필터링하여
+        '승격 실패' 0건을 보장한다. 로드된 CCTV 중 매칭이 없으면 skip.
+        """
         if incident.latitude is None or incident.longitude is None:
             logger.warning(
                 "좌표 없음 — 건너뜀: event_id=%s road=%s",
@@ -75,15 +79,34 @@ class IncidentReactor:
             )
             return
 
+        # 여유분을 확보하여 검색한 뒤, 로드된 CCTV만 필터링
         nearest = self._cctv_client.find_nearest(
             incident.latitude, incident.longitude,
-            top_k=INCIDENT_REACTOR_CCTVS,
+            top_k=INCIDENT_REACTOR_CCTVS * 3,
         )
 
         if not nearest:
             logger.warning(
                 "인근 CCTV 없음: event_id=%s (%.4f, %.4f)",
                 incident.event_id, incident.latitude, incident.longitude,
+            )
+            return
+
+        # StreamManager에 로드된 CCTV만 대상으로 필터링
+        loaded_ids = set(self._stream_manager.streams.keys())
+        nearest = [
+            (cctv, dist_km)
+            for cctv, dist_km in nearest
+            if cctv.cctv_id in loaded_ids
+        ]
+        nearest = nearest[:INCIDENT_REACTOR_CCTVS]
+
+        if not nearest:
+            logger.info(
+                "사고 범위 밖 — skip: event_id=%s road=%s %s "
+                "(로드된 %d대 중 인근 CCTV 없음)",
+                incident.event_id, incident.road_name, incident.direction,
+                len(loaded_ids),
             )
             return
 

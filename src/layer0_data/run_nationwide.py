@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import signal
 import shutil
 import sys
@@ -129,7 +130,15 @@ def _create_vision_pipeline():
 
 
 class NationwidePipeline:
-    """363대 전국 CCTV 3-Tier 통합 파이프라인."""
+    """363대 전국 CCTV 3-Tier 통합 파이프라인.
+
+    CPU 경합 방지: Tier 2/3 프레임을 큐에 넣고, 전용 워커 스레드 N개가
+    순차적으로 YOLO 처리. 워커 스레드 수 = max(4, OMP_NUM_THREADS).
+    """
+
+    # YOLO 처리 워커 스레드 수 (GIL 고려, OMP_NUM_THREADS와 매칭)
+    _VISION_WORKERS = max(4, int(os.environ.get("OMP_NUM_THREADS", "4")))
+    _FRAME_QUEUE_SIZE = 200
 
     def __init__(self, max_cameras: int = 0):
         self._stop_event = threading.Event()
@@ -153,6 +162,12 @@ class NationwidePipeline:
         self._lock = threading.Lock()
         self._max_cameras = max_cameras
 
+        # 프로듀서-컨슈머 큐: Tier 2/3 프레임을 직렬화 처리
+        self._frame_queue: queue.Queue = queue.Queue(
+            maxsize=self._FRAME_QUEUE_SIZE,
+        )
+        self._vision_threads: list[threading.Thread] = []
+
         self.stats = {
             "frames_t1": 0,
             "frames_t2": 0,
@@ -162,13 +177,50 @@ class NationwidePipeline:
             "preserved": 0,
             "deleted": 0,
             "anomalies_detected": 0,
+            "queue_drops": 0,
             "start_time": None,
         }
+
+    # ── Vision 큐 워커 ────────────────────────────────────────────────
+
+    def _start_vision_workers(self) -> None:
+        """Vision 처리 전용 스레드 N개 시작."""
+        for i in range(self._VISION_WORKERS):
+            t = threading.Thread(
+                target=self._vision_worker_loop,
+                name=f"vision-worker-{i}",
+                daemon=True,
+            )
+            t.start()
+            self._vision_threads.append(t)
+        logger.info(
+            "Vision 워커 %d개 시작 (큐 크기 %d)",
+            self._VISION_WORKERS, self._FRAME_QUEUE_SIZE,
+        )
+
+    def _vision_worker_loop(self) -> None:
+        """큐에서 프레임을 꺼내 Tier 2/3 처리."""
+        while not self._stop_event.is_set():
+            try:
+                item = self._frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:  # 종료 신호
+                break
+            frame, cctv_id, tier, timestamp = item
+            try:
+                self._handle_tier23(frame, cctv_id, tier, timestamp)
+            except Exception as e:
+                logger.error("Vision 워커 오류 [%s]: %s", cctv_id[:20], e)
 
     # ── 콜백 ─────────────────────────────────────────────────────────
 
     def _on_frame(self, frame: Any, cctv_id: str, tier: int) -> None:
-        """StreamManager 프레임 도착 콜백."""
+        """StreamManager 프레임 도착 콜백 (워커 스레드에서 호출).
+
+        Tier 1: 직접 처리 (경량 PreFilter, GIL 경합 미미).
+        Tier 2/3: 큐에 넣어 Vision 워커가 직렬 처리 (CPU 경합 방지).
+        """
         timestamp = time.monotonic()
 
         if tier == 1:
@@ -177,7 +229,13 @@ class NationwidePipeline:
                 self._cleanup_pipeline(cctv_id)
             self._handle_tier1(frame, cctv_id, timestamp)
         elif tier in (2, 3):
-            self._handle_tier23(frame, cctv_id, tier, timestamp)
+            try:
+                self._frame_queue.put_nowait(
+                    (frame, cctv_id, tier, timestamp),
+                )
+            except queue.Full:
+                with self._lock:
+                    self.stats["queue_drops"] += 1
 
     def _handle_tier1(self, frame: Any, cctv_id: str, timestamp: float) -> None:
         """Tier 1: 프리필터 적용, 이상 시 Tier 3 승격."""
@@ -491,18 +549,39 @@ class NationwidePipeline:
     # ── 핫스팟 선정 ──────────────────────────────────────────────────
 
     def _select_hotspots(self) -> set[str]:
-        """Tier 2 핫스팟 CCTV ID 집합 반환."""
+        """Tier 2 핫스팟 CCTV ID 집합 반환.
+
+        max_cameras가 설정되면 전체 비율(hotspot/total)을 유지하여
+        T1 최소 1대, T2 최소 1대를 보장한다.
+        """
         cctvs = self._cctv_client.list_cctvs()
         if not cctvs:
             return set()
 
         streamable = [c for c in cctvs if c.stream_url]
-        selected = streamable[:TIER2_HOTSPOT_COUNT]
+        total = len(streamable)
+        if total == 0:
+            return set()
+
+        # max_cameras 제한 시 비율 유지
+        if self._max_cameras > 0 and self._max_cameras < total:
+            # 비율 계산: hotspot_count / total_streamable
+            ratio = min(TIER2_HOTSPOT_COUNT / total, 1.0)
+            n_hotspot = max(1, int(self._max_cameras * ratio))
+            # T1도 최소 1대 확보
+            n_hotspot = min(n_hotspot, self._max_cameras - 1)
+            if n_hotspot < 1:
+                n_hotspot = 1
+        else:
+            n_hotspot = min(TIER2_HOTSPOT_COUNT, total)
+
+        selected = streamable[:n_hotspot]
         ids = {c.cctv_id for c in selected}
 
         logger.info(
-            "핫스팟 선정: %d/%d대 (스트림 가능 %d대)",
+            "핫스팟 선정: %d대 (총 %d대, 스트림 가능 %d대, max_cameras=%d)",
             len(ids), TIER2_HOTSPOT_COUNT, len(streamable),
+            self._max_cameras,
         )
         return ids
 
@@ -522,12 +601,16 @@ class NationwidePipeline:
         # 핫스팟 선정
         hotspots = self._select_hotspots()
 
+        # Vision 워커 스레드 시작 (Tier 2/3 프레임 큐 처리)
+        self._start_vision_workers()
+
         # 스트림 시작
         logger.info("=" * 60)
         logger.info("전국 CCTV 3-Tier 파이프라인 시작")
         logger.info("  Tier 1 (프리필터): 프리필터만")
         logger.info("  Tier 2 (핫스팟):   %d대 상시 정밀", len(hotspots))
         logger.info("  Tier 3 (동적):     최대 %d대 정밀", TIER3_MAX_CONCURRENT)
+        logger.info("  Vision 워커:       %d개", self._VISION_WORKERS)
         if self._max_cameras > 0:
             logger.info("  카메라 제한:       %d대", self._max_cameras)
         logger.info("=" * 60)
@@ -546,6 +629,9 @@ class NationwidePipeline:
         # ITS 사고 반응기
         self._incident_reactor.start()
 
+        # 초기 메모리 로깅
+        self._log_memory("시작")
+
         # 상태 출력 루프
         try:
             while not self._stop_event.is_set():
@@ -553,6 +639,7 @@ class NationwidePipeline:
                 if self._stop_event.is_set():
                     break
                 self._log_status()
+                self._log_memory("주기적")
                 self._save_status_file()
         except KeyboardInterrupt:
             self._stop_event.set()
@@ -569,13 +656,57 @@ class NationwidePipeline:
         logger.info("IncidentReactor 정지 중...")
         self._incident_reactor.stop()
 
+        # Vision 워커 종료
+        logger.info("Vision 워커 %d개 종료 중...", len(self._vision_threads))
+        for _ in self._vision_threads:
+            self._frame_queue.put(None)  # 종료 신호
+        for t in self._vision_threads:
+            t.join(timeout=5)
+        self._vision_threads.clear()
+
         # 활성 녹화 강제 종료
         for cctv_id, recorder in list(self._recorders.items()):
             if recorder.is_recording:
                 recorder.force_stop()
                 logger.info("녹화 강제 종료: %s", cctv_id[:20])
 
+        # 최종 메모리 로깅
+        self._log_memory("종료")
         self._print_summary()
+
+    # ── 메모리 프로파일링 ──────────────────────────────────────────────
+
+    def _log_memory(self, label: str = "") -> float:
+        """현재 프로세스 RSS 메모리를 로깅하고 MB 값을 반환."""
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            rss_mb = process.memory_info().rss / 1e6
+        except ImportError:
+            # psutil 없으면 /proc/self/status에서 직접 읽기
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rss_mb = int(line.split()[1]) / 1024  # kB -> MB
+                            break
+                    else:
+                        rss_mb = 0.0
+            except Exception:
+                rss_mb = 0.0
+
+        n_prefilters = len(self._prefilters)
+        n_pipelines = len(self._vision_pipelines)
+        q_size = self._frame_queue.qsize()
+
+        logger.info(
+            "메모리 [%s]: %.0f MB (prefilters=%d, pipelines=%d, "
+            "queue=%d/%d, drops=%d)",
+            label, rss_mb, n_prefilters, n_pipelines,
+            q_size, self._FRAME_QUEUE_SIZE,
+            self.stats.get("queue_drops", 0),
+        )
+        return rss_mb
 
     # ── 통계/상태 ────────────────────────────────────────────────────
 
@@ -591,6 +722,26 @@ class NationwidePipeline:
         combined["recorders_active"] = sum(
             1 for r in self._recorders.values() if r.is_recording
         )
+        combined["vision_queue_size"] = self._frame_queue.qsize()
+
+        # 메모리 측정
+        try:
+            import psutil
+            combined["memory_rss_mb"] = round(
+                psutil.Process(os.getpid()).memory_info().rss / 1e6, 1,
+            )
+        except Exception:
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            combined["memory_rss_mb"] = round(
+                                int(line.split()[1]) / 1024, 1,
+                            )
+                            break
+            except Exception:
+                combined["memory_rss_mb"] = None
+
         return combined
 
     def _log_status(self) -> None:
@@ -613,8 +764,11 @@ class NationwidePipeline:
             sm.get("tier_counts", {}).get(3, 0),
         )
         logger.info(
-            "파이프라인: %d개 | 프리필터: %d개 | 녹화중: %d대",
+            "파이프라인: %d개 | 프리필터: %d개 | 녹화중: %d대 | "
+            "메모리: %s MB | 큐: %d/%d (drop=%d)",
             s["pipelines_active"], s["prefilters_active"], s["recorders_active"],
+            s.get("memory_rss_mb", "?"), s.get("vision_queue_size", 0),
+            self._FRAME_QUEUE_SIZE, s.get("queue_drops", 0),
         )
         reactor = s.get("reactor", {})
         if reactor.get("active_reactions", 0) > 0:
