@@ -294,13 +294,12 @@ class NationwidePipeline:
     # ── VisionPipeline 관리 ──────────────────────────────────────────
 
     def _get_or_create_pipeline(self, cctv_id: str) -> Any | None:
-        """Tier 2/3 VisionPipeline lazy 초기화."""
+        """Tier 2/3 VisionPipeline lazy 초기화 (스레드 안전)."""
         pipeline = self._vision_pipelines.get(cctv_id)
         if pipeline is not None:
             return pipeline
 
         with self._lock:
-            # 이중 검사
             pipeline = self._vision_pipelines.get(cctv_id)
             if pipeline is not None:
                 return pipeline
@@ -314,14 +313,16 @@ class NationwidePipeline:
                 )
                 return None
 
-        try:
-            pipeline = _create_vision_pipeline()
-        except Exception as e:
-            logger.error("VisionPipeline 생성 실패 [%s]: %s", cctv_id[:20], e)
-            return None
+            try:
+                pipeline = _create_vision_pipeline()
+            except Exception as e:
+                logger.error(
+                    "VisionPipeline 생성 실패 [%s]: %s", cctv_id[:20], e,
+                )
+                return None
 
-        with self._lock:
             self._vision_pipelines[cctv_id] = pipeline
+
         logger.info(
             "VisionPipeline 생성: %s (총 %d개)",
             cctv_id[:20], len(self._vision_pipelines),
@@ -757,8 +758,10 @@ class NationwidePipeline:
             s["preserved"], s["deleted"],
         )
         logger.info(
-            "스트림: total=%d active=%d disabled=%d | T1=%d T2=%d T3=%d",
+            "스트림: total=%d active=%d disabled=%d zero_frame=%d "
+            "| T1=%d T2=%d T3=%d",
             sm.get("total", 0), sm.get("active", 0), sm.get("disabled", 0),
+            sm.get("zero_frame", 0),
             sm.get("tier_counts", {}).get(1, 0),
             sm.get("tier_counts", {}).get(2, 0),
             sm.get("tier_counts", {}).get(3, 0),

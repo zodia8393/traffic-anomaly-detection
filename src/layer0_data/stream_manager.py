@@ -44,6 +44,7 @@ class WorkerStats:
     frames: int = 0
     failures: int = 0
     consecutive_failures: int = 0
+    zero_frame_sessions: int = 0
     reconnects: int = 0
     last_frame_at: float = 0.0
     started_at: float = 0.0
@@ -114,7 +115,6 @@ class StreamWorker:
     def _run(self):
         """스트림 읽기 루프 (스레드에서 실행)."""
         while not self._stop_event.is_set() and not self.stats.disabled:
-            # FrameSampler 생성 + 시작
             self._sampler = FrameSampler(
                 stream_url=self.cctv.stream_url,
                 sample_fps=STREAM_SAMPLE_FPS,
@@ -134,6 +134,7 @@ class StreamWorker:
             )
 
             # 프레임 읽기 루프
+            session_frames = 0
             while not self._stop_event.is_set() and not self.stats.disabled:
                 ok, frame = self._sampler.read_frame()
                 if not ok:
@@ -142,14 +143,42 @@ class StreamWorker:
                     self._sampler = None
                     break
 
+                session_frames += 1
                 self.stats.frames += 1
                 self.stats.last_frame_at = time.monotonic()
                 self.stats.consecutive_failures = 0
+                self.stats.zero_frame_sessions = 0
 
                 try:
                     self._on_frame(frame, self.cctv.cctv_id, self.tier)
                 except Exception as e:
                     self._logger.error("콜백 오류: %s", e)
+
+            # 0프레임 세션 처리: 연결 성공했으나 프레임 0건
+            if session_frames == 0 and not self._stop_event.is_set():
+                self.stats.zero_frame_sessions += 1
+                if self.stats.zero_frame_sessions >= STREAM_MAX_FAILURES:
+                    self.stats.disabled = True
+                    self.stats.disabled_reason = (
+                        f"연속 {self.stats.zero_frame_sessions}회 0프레임"
+                    )
+                    self._logger.warning(
+                        "스트림 비활성화 (0프레임): %s — %s",
+                        self.cctv.name, self.stats.disabled_reason,
+                    )
+                    break
+                backoff = min(
+                    STREAM_RECONNECT_DELAY_SEC
+                    * (2 ** (self.stats.zero_frame_sessions - 1)),
+                    300,
+                )
+                self._logger.warning(
+                    "0프레임 세션 %d/%d: %s — %.0fs 후 재시도",
+                    self.stats.zero_frame_sessions, STREAM_MAX_FAILURES,
+                    self.cctv.name, backoff,
+                )
+                self._stop_event.wait(backoff)
+                continue
 
             if self.stats.disabled or self._stop_event.is_set():
                 break
@@ -376,6 +405,7 @@ class StreamManager:
             active = 0
             disabled = 0
             total_frames = 0
+            zero_frame = 0
 
             for cctv_id, worker in self.streams.items():
                 tier = self.tier_map.get(cctv_id, 1)
@@ -387,11 +417,14 @@ class StreamManager:
                     active += 1
 
                 total_frames += worker.stats.frames
+                if worker.stats.zero_frame_sessions > 0:
+                    zero_frame += 1
 
             return {
                 "total": len(self.streams),
                 "active": active,
                 "disabled": disabled,
+                "zero_frame": zero_frame,
                 "tier_counts": dict(tier_counts),
                 "total_frames": total_frames,
                 "tier3_pending_demote": len(self._tier3_expiry),
