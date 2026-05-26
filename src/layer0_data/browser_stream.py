@@ -52,6 +52,7 @@ class OutbreakIncident:
     road_name: str
     direction: str
     message: str
+    incident_time: str = ""
     raw_text: str = ""
     cctvs: list[dict] = field(default_factory=list)
 
@@ -328,6 +329,7 @@ class OutbreakCCTVCapture:
                 road_name=item.get("road", ""),
                 direction="",
                 message=f"{item.get('road', '')} {event_type} {item.get('date', '')}",
+                incident_time=item.get("date", ""),
                 raw_text=item.get("text", ""),
             ))
 

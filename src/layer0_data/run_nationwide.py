@@ -299,14 +299,25 @@ class OutbreakFeeder:
                     self.stats["frames_saved"] += n
 
                 if n > 0:
+                    elapsed_sec = None
+                    if inc.incident_time:
+                        try:
+                            inc_dt = datetime.strptime(inc.incident_time, "%Y-%m-%d %H:%M:%S")
+                            cap_dt = datetime.strptime(ts, "%Y%m%d_%H%M%S")
+                            elapsed_sec = (cap_dt - inc_dt).total_seconds()
+                        except ValueError:
+                            pass
+
                     metadata = {
                         "cctv_id": cctv_id,
                         "incident_type": inc.event_type,
                         "road_name": inc.road_name,
                         "message": inc.message,
+                        "incident_time": inc.incident_time,
                         "cctv_name": cctv.get("name", ""),
                         "distance": cctv.get("distance", ""),
                         "captured_at": ts,
+                        "elapsed_sec": elapsed_sec,
                         "frame_count": n,
                         "dwell_sec": OUTBREAK_DWELL_SEC,
                         "fps": OUTBREAK_CAPTURE_FPS,
@@ -315,8 +326,12 @@ class OutbreakFeeder:
                         json.dump(metadata, f, ensure_ascii=False, indent=2)
                     with self._lock:
                         self.stats["recordings"] += 1
+                    elapsed_str = ""
+                    if elapsed_sec is not None:
+                        m, s = divmod(int(elapsed_sec), 60)
+                        elapsed_str = f" (사고 후 {m}분{s}초)"
                     logger.info(
-                        "저장 완료: %s — %d프레임", rec_dir.name, n,
+                        "저장 완료: %s — %d프레임%s", rec_dir.name, n, elapsed_str,
                     )
                 else:
                     shutil.rmtree(rec_dir, ignore_errors=True)
