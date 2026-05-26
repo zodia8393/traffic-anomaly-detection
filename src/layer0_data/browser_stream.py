@@ -454,6 +454,106 @@ class OutbreakCCTVCapture:
             if not self._stop_event.is_set():
                 self._stop_event.wait(self.poll_interval)
 
+    def capture_dwelling(
+        self,
+        cctv: dict,
+        incident: OutbreakIncident,
+        dwell_sec: float = 30.0,
+        fps: float = 1.0,
+        on_frame: Callable[[CapturedFrame], None] | None = None,
+        extend_event: threading.Event | None = None,
+        extend_sec: float = 60.0,
+    ) -> list[CapturedFrame]:
+        """CCTV 클릭 후 dwell_sec 동안 연속 캡처, 매 프레임마다 on_frame 호출.
+
+        extend_event.set() 수신 시 체류 시간 extend_sec 추가.
+        """
+        if not self._page:
+            return []
+
+        page = self._page
+        cctv_name = cctv.get("name", "")
+        distance = cctv.get("distance", "")
+
+        prev_src = page.evaluate(
+            "document.querySelector('video')?.currentSrc || ''"
+        )
+        try:
+            click_result = page.evaluate(_JS_CLICK_CCTV, cctv.get("index", 0))
+        except Exception as e:
+            logger.debug("CCTV 클릭 오류: %s (%s)", cctv_name, e)
+            return []
+        if not click_result or not click_result.get("ok"):
+            logger.debug("CCTV 클릭 실패: %s", cctv_name)
+            return []
+
+        for attempt in range(_VIDEO_LOAD_TIMEOUT):
+            time.sleep(1)
+            try:
+                state = page.evaluate(_JS_CHECK_VIDEO)
+            except Exception:
+                continue
+            if state and state.get("ready"):
+                cur_src = state.get("src", "")
+                if cur_src != prev_src or attempt >= 3:
+                    break
+        else:
+            logger.debug("영상 로드 타임아웃 (체류): %s", cctv_name)
+            return []
+
+        logger.info(
+            "체류 시작: %s (%ds, %.1ffps)", cctv_name[:40], int(dwell_sec), fps,
+        )
+
+        interval = 1.0 / fps
+        deadline = time.monotonic() + dwell_sec
+        frames: list[CapturedFrame] = []
+
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            t0 = time.monotonic()
+            try:
+                capture = page.evaluate(_JS_CAPTURE_FRAME)
+            except Exception:
+                capture = None
+
+            if capture and capture.get("dataUrl"):
+                frame_bgr, w, h = _b64_to_bgr(capture["dataUrl"])
+                if frame_bgr is not None:
+                    cf = CapturedFrame(
+                        incident_type=incident.event_type,
+                        road_name=incident.road_name,
+                        cctv_name=cctv_name,
+                        distance=distance,
+                        frame=frame_bgr,
+                        timestamp=time.time(),
+                        width=w,
+                        height=h,
+                        jpeg_size=capture.get("size", 0),
+                    )
+                    frames.append(cf)
+                    with self._lock:
+                        self._stats["total_frames"] += 1
+                    if on_frame:
+                        on_frame(cf)
+
+            if extend_event and extend_event.is_set():
+                extend_event.clear()
+                deadline = time.monotonic() + extend_sec
+                logger.info(
+                    "체류 연장: %s (+%ds)", cctv_name[:30], int(extend_sec),
+                )
+
+            elapsed = time.monotonic() - t0
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        logger.info(
+            "체류 종료: %s — %d프레임 (%ds)",
+            cctv_name[:40], len(frames), int(dwell_sec),
+        )
+        return frames
+
     def get_stats(self) -> dict:
         with self._lock:
             return dict(self._stats)
@@ -627,14 +727,8 @@ def _b64_to_bgr(data_url: str) -> tuple[np.ndarray | None, int, int]:
 # 테스트
 # ═══════════════════════════════════════════════════════════════════════
 
-def _test():
-    """돌발정보 페이지 1사이클 캡처 테스트."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
+def _test_snapshot(max_incidents: int = 3, max_per_cycle: int = 10):
+    """돌발정보 페이지 1사이클 스냅샷 캡처 테스트."""
     output_dir = Path(
         "/workspace/prj_cctv/사고분석_설계/output/outbreak_captures"
     )
@@ -642,7 +736,7 @@ def _test():
         target_types=("사고", "고장"),
         cctv_delay=5.0,
         incident_delay=3.0,
-        max_per_cycle=10,
+        max_per_cycle=max_per_cycle,
         output_dir=output_dir,
     )
 
@@ -661,7 +755,7 @@ def _test():
             return
 
         all_frames = []
-        for i, inc in enumerate(incidents[:3]):
+        for i, inc in enumerate(incidents[:max_incidents]):
             print(f"\n>>> [{inc.event_type}] {inc.message[:60]}")
             frames = cap.capture_incident_cctvs(inc)
             all_frames.extend(frames)
@@ -670,7 +764,7 @@ def _test():
                     f"  캡처: {f.cctv_name} "
                     f"({f.width}x{f.height}, {f.jpeg_size:,}B)"
                 )
-            if i < min(2, len(incidents) - 1):
+            if i < min(max_incidents - 1, len(incidents) - 1):
                 time.sleep(cap.incident_delay)
 
         stats = cap.get_stats()
@@ -685,5 +779,136 @@ def _test():
         cap.stop()
 
 
+def _test_dwelling(
+    dwell_sec: float = 30.0,
+    fps: float = 1.0,
+    max_incidents: int = 2,
+    output: str | None = None,
+    loop: bool = False,
+):
+    """체류 캡처 테스트: CCTV당 dwell_sec 동안 fps로 연속 캡처."""
+    import re
+
+    output_dir = Path(
+        output or "/workspace/prj_cctv/사고분석_설계/output/outbreak_dwelling"
+    )
+    cap = OutbreakCCTVCapture(
+        target_types=("사고", "고장"),
+        cctv_delay=5.0,
+        incident_delay=3.0,
+        max_cctvs_per_incident=2,
+    )
+
+    if not cap.start():
+        print("브라우저 시작 실패")
+        return
+
+    def _make_cctv_id(incident: OutbreakIncident, cctv: dict) -> str:
+        raw = cctv.get("name", "unknown")
+        sanitized = re.sub(r'[\[\]\s/]', '_', raw).strip('_')[:40]
+        return f"OB_{sanitized}"
+
+    try:
+        while True:
+            incidents = cap.scan_incidents()
+            print(f"\n돌발정보 스캔: {len(incidents)}건 (사고/고장)")
+
+            if not incidents:
+                print("대상 사고 없음")
+                if not loop:
+                    return
+                print(f"다음 스캔까지 {cap.poll_interval}초 대기...")
+                time.sleep(cap.poll_interval)
+                continue
+
+            total_frames = 0
+            for i, inc in enumerate(incidents[:max_incidents]):
+                if cap._stop_event.is_set():
+                    break
+                print(f"\n>>> [{inc.event_type}] {inc.message[:60]}")
+
+                click_ok = cap._click_incident(inc.dom_index)
+                if not click_ok:
+                    print("  사고 클릭 실패")
+                    continue
+                cap._page.wait_for_timeout(2000)
+
+                cctvs = cap._get_nearby_cctvs()
+                if not cctvs:
+                    print("  인근 CCTV 없음")
+                    continue
+
+                for cctv in cctvs[:cap.max_cctvs_per_incident]:
+                    cctv_id = _make_cctv_id(inc, cctv)
+                    cctv_dir = output_dir / cctv_id
+                    cctv_dir.mkdir(parents=True, exist_ok=True)
+
+                    frame_idx = [0]
+
+                    def save_frame(cf: CapturedFrame, d=cctv_dir, idx=frame_idx):
+                        path = d / f"{idx[0]:04d}.jpg"
+                        Image.fromarray(cf.frame[:, :, ::-1]).save(
+                            str(path), "JPEG", quality=85,
+                        )
+                        idx[0] += 1
+
+                    frames = cap.capture_dwelling(
+                        cctv=cctv,
+                        incident=inc,
+                        dwell_sec=dwell_sec,
+                        fps=fps,
+                        on_frame=save_frame,
+                    )
+                    total_frames += len(frames)
+                    print(
+                        f"  {cctv.get('name', '')[:40]} "
+                        f"→ {len(frames)}프레임 → {cctv_dir}",
+                    )
+                    time.sleep(cap.cctv_delay)
+
+                if i < min(max_incidents - 1, len(incidents) - 1):
+                    time.sleep(cap.incident_delay)
+
+            print(f"\n=== 체류 캡처 결과: {total_frames}프레임 ===")
+            if not loop:
+                break
+            print(f"다음 사이클까지 {cap.poll_interval}초 대기...")
+            time.sleep(cap.poll_interval)
+    finally:
+        cap.stop()
+
+
 if __name__ == "__main__":
-    _test()
+    import argparse
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    parser = argparse.ArgumentParser(
+        description="ITS 돌발정보 CCTV 프레임 캡처",
+    )
+    parser.add_argument(
+        "--dwell", type=float, default=0,
+        help="체류 시간 (초, 0=스냅샷 모드)",
+    )
+    parser.add_argument("--fps", type=float, default=1.0, help="캡처 fps")
+    parser.add_argument(
+        "--max-incidents", type=int, default=3, help="최대 사고 수",
+    )
+    parser.add_argument("--loop", action="store_true", help="연속 루프")
+    parser.add_argument("--output", type=str, default=None, help="출력 디렉토리")
+    args = parser.parse_args()
+
+    if args.dwell > 0:
+        _test_dwelling(
+            dwell_sec=args.dwell,
+            fps=args.fps,
+            max_incidents=args.max_incidents,
+            output=args.output,
+            loop=args.loop,
+        )
+    else:
+        _test_snapshot(max_incidents=args.max_incidents)

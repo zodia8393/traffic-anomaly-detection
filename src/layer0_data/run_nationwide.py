@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import queue
 import signal
 import shutil
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +57,16 @@ from config_new import (
     PREFILTER_COOLDOWN_SEC,
     PREFILTER_TIER3_HOLD_SEC,
     INCIDENT_POLL_SEC,
+    OUTBREAK_ENABLED,
+    OUTBREAK_DWELL_SEC,
+    OUTBREAK_DWELL_EXTEND_SEC,
+    OUTBREAK_CAPTURE_FPS,
+    OUTBREAK_CCTV_DELAY,
+    OUTBREAK_INCIDENT_DELAY,
+    OUTBREAK_POLL_INTERVAL,
+    OUTBREAK_MAX_PER_CYCLE,
+    OUTBREAK_MAX_PER_INCIDENT,
+    OUTBREAK_RECORDING_DIR,
 )
 from stream_manager import StreamManager
 from incident_reactor import IncidentReactor
@@ -130,6 +142,282 @@ def _create_vision_pipeline():
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# OutbreakFeeder: 돌발정보 CCTV 체류 캡처 → 파이프라인 브릿지
+# ═══════════════════════════════════════════════════════════════════════
+
+try:
+    from browser_stream import OutbreakCCTVCapture, OutbreakIncident, CapturedFrame
+    _HAS_OUTBREAK = True
+except ImportError:
+    _HAS_OUTBREAK = False
+
+
+class OutbreakFeeder:
+    """OutbreakCCTVCapture → NationwidePipeline 프레임 브릿지.
+
+    돌발정보 페이지 사고/고장 인근 CCTV를 순찰하며 체류 캡처(30s×1fps).
+    캡처된 프레임을 NationwidePipeline Vision 큐에 주입하고,
+    트리거 발화 시 체류 연장 + 프레임 시퀀스 저장.
+    """
+
+    def __init__(self, pipeline: "NationwidePipeline", stop_event: threading.Event):
+        self._pipeline = pipeline
+        self._stop_event = stop_event
+        self._capture: OutbreakCCTVCapture | None = None
+        self._thread: threading.Thread | None = None
+
+        self._extend_events: dict[str, threading.Event] = {}
+        self._frame_buffers: dict[str, deque] = {}
+        self._recordings: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+        self._output_dir = OUTBREAK_RECORDING_DIR
+        self.stats = {
+            "patrols": 0,
+            "incidents": 0,
+            "dwells": 0,
+            "frames_injected": 0,
+            "triggers_received": 0,
+            "recordings_saved": 0,
+        }
+
+    def start(self) -> bool:
+        if not _HAS_OUTBREAK:
+            logger.error("OutbreakFeeder: playwright 미설치, 비활성화")
+            return False
+
+        # Playwright sync API는 greenlet 기반 → 브라우저를 사용할 스레드에서 시작해야 함
+        # start()는 스레드만 띄우고, 브라우저는 _patrol_loop 내에서 시작
+        self._thread = threading.Thread(
+            target=self._patrol_loop,
+            name="outbreak-feeder",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("OutbreakFeeder 시작 (dwell=%ds, fps=%.1f)",
+                     OUTBREAK_DWELL_SEC, OUTBREAK_CAPTURE_FPS)
+        return True
+
+    def stop(self):
+        if self._capture:
+            self._capture.stop()
+            self._capture = None
+        if self._thread:
+            self._thread.join(timeout=10)
+            self._thread = None
+        logger.info("OutbreakFeeder 종료 | %s", self.stats)
+
+    def on_trigger(self, trigger: Any, cctv_id: str):
+        """파이프라인 트리거 발화 → 체류 연장 + 프레임 시퀀스 저장 시작."""
+        with self._lock:
+            self.stats["triggers_received"] += 1
+
+        ev = self._extend_events.get(cctv_id)
+        if ev:
+            ev.set()
+            logger.info("트리거→체류연장: %s [%s]", trigger.type, cctv_id[:30])
+
+        with self._lock:
+            if cctv_id not in self._recordings:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                rec_dir = self._output_dir / f"{cctv_id}_{ts}"
+                rec_dir.mkdir(parents=True, exist_ok=True)
+                (rec_dir / "frames").mkdir(exist_ok=True)
+                (rec_dir / "keyframes").mkdir(exist_ok=True)
+
+                pre_frames = list(self._frame_buffers.get(cctv_id, []))
+                self._recordings[cctv_id] = {
+                    "dir": rec_dir,
+                    "frame_count": 0,
+                    "triggers": [],
+                    "started_at": time.time(),
+                }
+
+                from PIL import Image
+                for i, (_, frame_bgr) in enumerate(pre_frames):
+                    path = rec_dir / "frames" / f"{i:04d}.jpg"
+                    Image.fromarray(frame_bgr[:, :, ::-1]).save(
+                        str(path), "JPEG", quality=85,
+                    )
+                self._recordings[cctv_id]["frame_count"] = len(pre_frames)
+
+            rec = self._recordings[cctv_id]
+            rec["triggers"].append({
+                "type": trigger.type,
+                "severity": float(trigger.severity),
+                "description": trigger.description,
+                "timestamp": time.time(),
+                "frame_idx": trigger.frame_idx,
+            })
+
+        trigger_log = rec["dir"] / "trigger_log.jsonl"
+        with open(trigger_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec["triggers"][-1], ensure_ascii=False) + "\n")
+
+    def get_stats(self) -> dict:
+        with self._lock:
+            return dict(self.stats)
+
+    # ── 내부 ─────────────────────────────────────────────────────────
+
+    def _patrol_loop(self):
+        # Playwright sync API는 greenlet 기반 → 사용 스레드에서 브라우저 시작
+        self._capture = OutbreakCCTVCapture(
+            target_types=("사고", "고장"),
+            cctv_delay=OUTBREAK_CCTV_DELAY,
+            incident_delay=OUTBREAK_INCIDENT_DELAY,
+            poll_interval=OUTBREAK_POLL_INTERVAL,
+            max_per_cycle=OUTBREAK_MAX_PER_CYCLE,
+            max_cctvs_per_incident=OUTBREAK_MAX_PER_INCIDENT,
+        )
+        if not self._capture.start():
+            logger.error("OutbreakFeeder: 브라우저 시작 실패 (patrol 스레드)")
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                self._run_one_patrol()
+            except Exception as e:
+                logger.error("순찰 루프 오류: %s", e, exc_info=True)
+                try:
+                    if self._capture:
+                        self._capture._navigate_to_outbreak()
+                except Exception:
+                    pass
+
+            if not self._stop_event.is_set():
+                self._stop_event.wait(OUTBREAK_POLL_INTERVAL)
+
+    def _run_one_patrol(self):
+        if not self._capture or not self._capture._page:
+            return
+
+        with self._lock:
+            self.stats["patrols"] += 1
+
+        incidents = self._capture.scan_incidents()
+        if not incidents:
+            logger.info("OutbreakFeeder: 대상 사고 0건")
+            return
+
+        with self._lock:
+            self.stats["incidents"] += len(incidents)
+
+        dwell_count = 0
+        for inc in incidents:
+            if self._stop_event.is_set():
+                break
+            if dwell_count >= OUTBREAK_MAX_PER_CYCLE:
+                break
+
+            click_ok = self._capture._click_incident(inc.dom_index)
+            if not click_ok:
+                continue
+            self._capture._page.wait_for_timeout(2000)
+
+            cctvs = self._capture._get_nearby_cctvs()
+            if not cctvs:
+                continue
+
+            limit = min(len(cctvs), OUTBREAK_MAX_PER_INCIDENT)
+            for cctv in cctvs[:limit]:
+                if self._stop_event.is_set() or dwell_count >= OUTBREAK_MAX_PER_CYCLE:
+                    break
+
+                cctv_id = self._make_cctv_id(inc, cctv)
+                extend_event = threading.Event()
+                self._extend_events[cctv_id] = extend_event
+                self._frame_buffers[cctv_id] = deque(maxlen=30)
+
+                with self._lock:
+                    self.stats["dwells"] += 1
+
+                self._capture.capture_dwelling(
+                    cctv=cctv,
+                    incident=inc,
+                    dwell_sec=OUTBREAK_DWELL_SEC,
+                    fps=OUTBREAK_CAPTURE_FPS,
+                    on_frame=lambda cf, cid=cctv_id: self._on_dwelling_frame(cf, cid),
+                    extend_event=extend_event,
+                    extend_sec=OUTBREAK_DWELL_EXTEND_SEC,
+                )
+
+                self._finalize_recording(cctv_id, inc)
+                self._extend_events.pop(cctv_id, None)
+                self._frame_buffers.pop(cctv_id, None)
+                dwell_count += 1
+
+                if not self._stop_event.is_set():
+                    time.sleep(OUTBREAK_CCTV_DELAY)
+
+            if not self._stop_event.is_set():
+                time.sleep(OUTBREAK_INCIDENT_DELAY)
+
+        logger.info(
+            "OutbreakFeeder 순찰 완료: 사고 %d건, 체류 %d회",
+            len(incidents), dwell_count,
+        )
+
+    def _on_dwelling_frame(self, captured_frame: Any, cctv_id: str):
+        frame_bgr = captured_frame.frame
+
+        buf = self._frame_buffers.get(cctv_id)
+        if buf is not None:
+            buf.append((time.time(), frame_bgr))
+
+        self._pipeline._on_frame(frame_bgr, cctv_id, tier=3)
+        with self._lock:
+            self.stats["frames_injected"] += 1
+
+        rec = self._recordings.get(cctv_id)
+        if rec:
+            from PIL import Image
+            idx = rec["frame_count"]
+            path = rec["dir"] / "frames" / f"{idx:04d}.jpg"
+            Image.fromarray(frame_bgr[:, :, ::-1]).save(
+                str(path), "JPEG", quality=85,
+            )
+            rec["frame_count"] = idx + 1
+
+    def _finalize_recording(self, cctv_id: str, incident: Any):
+        rec = self._recordings.pop(cctv_id, None)
+        if not rec:
+            return
+        if rec["frame_count"] == 0:
+            shutil.rmtree(rec["dir"], ignore_errors=True)
+            return
+
+        metadata = {
+            "cctv_id": cctv_id,
+            "incident_type": incident.event_type,
+            "road_name": incident.road_name,
+            "message": incident.message,
+            "started_at": datetime.fromtimestamp(rec["started_at"]).isoformat(),
+            "ended_at": datetime.now().isoformat(),
+            "frame_count": rec["frame_count"],
+            "trigger_count": len(rec["triggers"]),
+            "triggers": rec["triggers"],
+        }
+        meta_path = rec["dir"] / "metadata.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        with self._lock:
+            self.stats["recordings_saved"] += 1
+
+        logger.info(
+            "녹화 완료: %s — %d프레임, %d트리거",
+            rec["dir"].name, rec["frame_count"], len(rec["triggers"]),
+        )
+
+    @staticmethod
+    def _make_cctv_id(incident: Any, cctv: dict) -> str:
+        raw = cctv.get("name", "unknown")
+        sanitized = re.sub(r'[\[\]\s/]', '_', raw).strip('_')[:40]
+        return f"OB_{sanitized}"
+
+
 class NationwidePipeline:
     """363대 전국 CCTV 3-Tier 통합 파이프라인.
 
@@ -141,8 +429,9 @@ class NationwidePipeline:
     _VISION_WORKERS = max(4, int(os.environ.get("OMP_NUM_THREADS", "4")))
     _FRAME_QUEUE_SIZE = 200
 
-    def __init__(self, max_cameras: int = 0):
+    def __init__(self, max_cameras: int = 0, outbreak_only: bool = False):
         self._stop_event = threading.Event()
+        self._outbreak_only = outbreak_only
         self._cctv_client = ITSCCTVClient()
         self._stream_manager = StreamManager(
             cctv_client=self._cctv_client,
@@ -153,6 +442,7 @@ class NationwidePipeline:
             cctv_client=self._cctv_client,
             stop_event=self._stop_event,
         )
+        self._outbreak_feeder: OutbreakFeeder | None = None
 
         self._prefilters: dict[str, PreFilter] = {}
         self._vision_pipelines: dict[str, Any] = {}
@@ -353,6 +643,11 @@ class NationwidePipeline:
         if trigger.type not in RECORD_TRIGGER_TYPES:
             return
         if trigger.severity < SEVERITY_GATE:
+            return
+
+        # Outbreak CCTV: 체류 연장 + 프레임 시퀀스 저장 (ffmpeg 녹화 불가)
+        if cctv_id.startswith("OB_") and self._outbreak_feeder:
+            self._outbreak_feeder.on_trigger(trigger, cctv_id)
             return
 
         recorder = self._recorders.get(cctv_id)
@@ -600,36 +895,51 @@ class NationwidePipeline:
 
         signal.signal(signal.SIGINT, signal_handler)
 
-        # 핫스팟 선정
-        hotspots = self._select_hotspots()
-
         # Vision 워커 스레드 시작 (Tier 2/3 프레임 큐 처리)
         self._start_vision_workers()
 
-        # 스트림 시작
-        logger.info("=" * 60)
-        logger.info("전국 CCTV 3-Tier 파이프라인 시작")
-        logger.info("  Tier 1 (프리필터): 프리필터만")
-        logger.info("  Tier 2 (핫스팟):   %d대 상시 정밀", len(hotspots))
-        logger.info("  Tier 3 (동적):     최대 %d대 정밀", TIER3_MAX_CONCURRENT)
-        logger.info("  Vision 워커:       %d개", self._VISION_WORKERS)
-        if self._max_cameras > 0:
-            logger.info("  카메라 제한:       %d대", self._max_cameras)
-        logger.info("=" * 60)
+        if not self._outbreak_only:
+            # 핫스팟 선정
+            hotspots = self._select_hotspots()
 
-        started = self._stream_manager.start_all(
-            on_frame=self._on_frame,
-            hotspot_ids=hotspots,
-            max_cameras=self._max_cameras,
-        )
-        if started == 0:
-            logger.error("스트림 시작 실패 -- 종료")
-            return
+            # 스트림 시작
+            logger.info("=" * 60)
+            logger.info("전국 CCTV 3-Tier 파이프라인 시작")
+            logger.info("  Tier 1 (프리필터): 프리필터만")
+            logger.info("  Tier 2 (핫스팟):   %d대 상시 정밀", len(hotspots))
+            logger.info("  Tier 3 (동적):     최대 %d대 정밀", TIER3_MAX_CONCURRENT)
+            logger.info("  Vision 워커:       %d개", self._VISION_WORKERS)
+            if self._max_cameras > 0:
+                logger.info("  카메라 제한:       %d대", self._max_cameras)
+            logger.info("=" * 60)
 
-        logger.info("스트림 %d대 시작 완료", started)
+            started = self._stream_manager.start_all(
+                on_frame=self._on_frame,
+                hotspot_ids=hotspots,
+                max_cameras=self._max_cameras,
+            )
+            if started == 0:
+                logger.warning("StreamManager 스트림 0대 — Outbreak 경로만 가동")
 
-        # ITS 사고 반응기
-        self._incident_reactor.start()
+            logger.info("스트림 %d대 시작 완료", started)
+
+            # ITS 사고 반응기
+            self._incident_reactor.start()
+        else:
+            logger.info("=" * 60)
+            logger.info("Outbreak 전용 모드 (StreamManager/IncidentReactor 비활성)")
+            logger.info("  Vision 워커: %d개", self._VISION_WORKERS)
+            logger.info("=" * 60)
+
+        # OutbreakFeeder 시작
+        if OUTBREAK_ENABLED and _HAS_OUTBREAK:
+            self._outbreak_feeder = OutbreakFeeder(
+                pipeline=self,
+                stop_event=self._stop_event,
+            )
+            if not self._outbreak_feeder.start():
+                logger.warning("OutbreakFeeder 시작 실패 — 비활성화")
+                self._outbreak_feeder = None
 
         # 초기 메모리 로깅
         self._log_memory("시작")
@@ -652,11 +962,17 @@ class NationwidePipeline:
         """파이프라인 정지."""
         self._stop_event.set()
 
-        logger.info("StreamManager 정지 중...")
-        self._stream_manager.stop_all()
+        if self._outbreak_feeder:
+            logger.info("OutbreakFeeder 정지 중...")
+            self._outbreak_feeder.stop()
+            self._outbreak_feeder = None
 
-        logger.info("IncidentReactor 정지 중...")
-        self._incident_reactor.stop()
+        if not self._outbreak_only:
+            logger.info("StreamManager 정지 중...")
+            self._stream_manager.stop_all()
+
+            logger.info("IncidentReactor 정지 중...")
+            self._incident_reactor.stop()
 
         # Vision 워커 종료
         logger.info("Vision 워커 %d개 종료 중...", len(self._vision_threads))
@@ -726,6 +1042,9 @@ class NationwidePipeline:
         )
         combined["vision_queue_size"] = self._frame_queue.qsize()
 
+        if self._outbreak_feeder:
+            combined["outbreak"] = self._outbreak_feeder.get_stats()
+
         # 메모리 측정
         try:
             import psutil
@@ -779,6 +1098,14 @@ class NationwidePipeline:
             logger.info(
                 "ITS 반응: %d건 활성 (CCTV %d대 편입)",
                 reactor["active_reactions"], reactor["active_cctvs"],
+            )
+        ob = s.get("outbreak", {})
+        if ob:
+            logger.info(
+                "Outbreak: 순찰=%d 체류=%d 주입=%d 트리거=%d 녹화=%d",
+                ob.get("patrols", 0), ob.get("dwells", 0),
+                ob.get("frames_injected", 0), ob.get("triggers_received", 0),
+                ob.get("recordings_saved", 0),
             )
         logger.info("-" * 50)
 
@@ -865,13 +1192,20 @@ def main():
         "--max-cameras", type=int, default=0,
         help=f"카메라 수 제한 (0=기본값 {NATIONWIDE_MAX_CAMERAS}대)",
     )
+    p_start.add_argument(
+        "--outbreak-only", action="store_true",
+        help="돌발정보 CCTV만 가동 (StreamManager/IncidentReactor 비활성)",
+    )
 
     sub.add_parser("status", help="수집 현황 확인")
 
     args = parser.parse_args()
 
     if args.command == "start":
-        pipeline = NationwidePipeline(max_cameras=args.max_cameras)
+        pipeline = NationwidePipeline(
+            max_cameras=args.max_cameras,
+            outbreak_only=args.outbreak_only,
+        )
         pipeline.start()
     elif args.command == "status":
         from run_realtime import RealtimeAccidentPipeline
@@ -880,9 +1214,10 @@ def main():
         parser.print_help()
         print()
         print("예시:")
-        print("  python run_nationwide.py start                  # 전국 363대 시작")
-        print("  python run_nationwide.py start --max-cameras 10 # 테스트 10대")
-        print("  python run_nationwide.py status                 # 수집 현황")
+        print("  python run_nationwide.py start                    # 전국 363대 시작")
+        print("  python run_nationwide.py start --max-cameras 10   # 테스트 10대")
+        print("  python run_nationwide.py start --outbreak-only    # 돌발정보만")
+        print("  python run_nationwide.py status                   # 수집 현황")
 
 
 if __name__ == "__main__":

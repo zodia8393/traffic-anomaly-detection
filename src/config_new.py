@@ -109,5 +109,17 @@ INCIDENT_POLL_SEC = 60               # ITS 돌발상황 폴링 주기
 INCIDENT_REACTOR_CCTVS = 3           # 사고 시 편입할 인근 CCTV 수
 INCIDENT_HOLD_SEC = 600              # 사고 편입 CCTV 유지 시간 (10분)
 
+# ── 돌발정보 CCTV 캡처 ──────────────────────────────────────────────
+OUTBREAK_DWELL_SEC = 30              # CCTV 체류 시간 (초)
+OUTBREAK_DWELL_EXTEND_SEC = 60       # 트리거 발화 시 연장 (초)
+OUTBREAK_CAPTURE_FPS = 1.0           # 체류 중 캡처 fps
+OUTBREAK_CCTV_DELAY = 5.0            # CCTV 전환 간 대기 (초)
+OUTBREAK_INCIDENT_DELAY = 3.0        # 사고 전환 간 대기 (초)
+OUTBREAK_POLL_INTERVAL = 300         # 전체 스캔 주기 (초)
+OUTBREAK_MAX_PER_CYCLE = 20          # 사이클당 최대 체류 CCTV 수
+OUTBREAK_MAX_PER_INCIDENT = 2        # 사고당 최대 CCTV 수
+OUTBREAK_ENABLED = True              # 활성화 플래그
+OUTBREAK_RECORDING_DIR = OUTPUT_DIR / "outbreak_recordings"
+
 # ── DuckDB ───────────────────────────────────────────────────────────
 DUCKDB_PATH = str(DATA_DIR / "accident.duckdb")
