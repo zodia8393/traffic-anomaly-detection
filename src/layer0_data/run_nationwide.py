@@ -22,7 +22,6 @@ import shutil
 import sys
 import threading
 import time
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -59,7 +58,6 @@ from config_new import (
     INCIDENT_POLL_SEC,
     OUTBREAK_ENABLED,
     OUTBREAK_DWELL_SEC,
-    OUTBREAK_DWELL_EXTEND_SEC,
     OUTBREAK_CAPTURE_FPS,
     OUTBREAK_CCTV_DELAY,
     OUTBREAK_INCIDENT_DELAY,
@@ -143,7 +141,7 @@ def _create_vision_pipeline():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# OutbreakFeeder: 돌발정보 CCTV 체류 캡처 → 파이프라인 브릿지
+# OutbreakFeeder: 돌발정보 CCTV 체류 캡처 → 프레임 저장
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
@@ -154,22 +152,16 @@ except ImportError:
 
 
 class OutbreakFeeder:
-    """OutbreakCCTVCapture → NationwidePipeline 프레임 브릿지.
+    """돌발정보 사고/고장 인근 CCTV 프레임 자동 수집.
 
-    돌발정보 페이지 사고/고장 인근 CCTV를 순찰하며 체류 캡처(30s×1fps).
-    캡처된 프레임을 NationwidePipeline Vision 큐에 주입하고,
-    트리거 발화 시 체류 연장 + 프레임 시퀀스 저장.
+    돌발정보 페이지의 CCTV는 이미 사고 확인된 현장이므로
+    Vision 파이프라인(YOLO/ByteTrack/Trigger) 없이 프레임만 저장한다.
     """
 
-    def __init__(self, pipeline: "NationwidePipeline", stop_event: threading.Event):
-        self._pipeline = pipeline
+    def __init__(self, stop_event: threading.Event):
         self._stop_event = stop_event
         self._capture: OutbreakCCTVCapture | None = None
         self._thread: threading.Thread | None = None
-
-        self._extend_events: dict[str, threading.Event] = {}
-        self._frame_buffers: dict[str, deque] = {}
-        self._recordings: dict[str, dict] = {}
         self._lock = threading.Lock()
 
         self._output_dir = OUTBREAK_RECORDING_DIR
@@ -177,9 +169,8 @@ class OutbreakFeeder:
             "patrols": 0,
             "incidents": 0,
             "dwells": 0,
-            "frames_injected": 0,
-            "triggers_received": 0,
-            "recordings_saved": 0,
+            "frames_saved": 0,
+            "recordings": 0,
         }
 
     def start(self) -> bool:
@@ -187,8 +178,6 @@ class OutbreakFeeder:
             logger.error("OutbreakFeeder: playwright 미설치, 비활성화")
             return False
 
-        # Playwright sync API는 greenlet 기반 → 브라우저를 사용할 스레드에서 시작해야 함
-        # start()는 스레드만 띄우고, 브라우저는 _patrol_loop 내에서 시작
         self._thread = threading.Thread(
             target=self._patrol_loop,
             name="outbreak-feeder",
@@ -207,53 +196,6 @@ class OutbreakFeeder:
             self._thread.join(timeout=10)
             self._thread = None
         logger.info("OutbreakFeeder 종료 | %s", self.stats)
-
-    def on_trigger(self, trigger: Any, cctv_id: str):
-        """파이프라인 트리거 발화 → 체류 연장 + 프레임 시퀀스 저장 시작."""
-        with self._lock:
-            self.stats["triggers_received"] += 1
-
-        ev = self._extend_events.get(cctv_id)
-        if ev:
-            ev.set()
-            logger.info("트리거→체류연장: %s [%s]", trigger.type, cctv_id[:30])
-
-        with self._lock:
-            if cctv_id not in self._recordings:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                rec_dir = self._output_dir / f"{cctv_id}_{ts}"
-                rec_dir.mkdir(parents=True, exist_ok=True)
-                (rec_dir / "frames").mkdir(exist_ok=True)
-                (rec_dir / "keyframes").mkdir(exist_ok=True)
-
-                pre_frames = list(self._frame_buffers.get(cctv_id, []))
-                self._recordings[cctv_id] = {
-                    "dir": rec_dir,
-                    "frame_count": 0,
-                    "triggers": [],
-                    "started_at": time.time(),
-                }
-
-                from PIL import Image
-                for i, (_, frame_bgr) in enumerate(pre_frames):
-                    path = rec_dir / "frames" / f"{i:04d}.jpg"
-                    Image.fromarray(frame_bgr[:, :, ::-1]).save(
-                        str(path), "JPEG", quality=85,
-                    )
-                self._recordings[cctv_id]["frame_count"] = len(pre_frames)
-
-            rec = self._recordings[cctv_id]
-            rec["triggers"].append({
-                "type": trigger.type,
-                "severity": float(trigger.severity),
-                "description": trigger.description,
-                "timestamp": time.time(),
-                "frame_idx": trigger.frame_idx,
-            })
-
-        trigger_log = rec["dir"] / "trigger_log.jsonl"
-        with open(trigger_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec["triggers"][-1], ensure_ascii=False) + "\n")
 
     def get_stats(self) -> dict:
         with self._lock:
@@ -326,28 +268,60 @@ class OutbreakFeeder:
                     break
 
                 cctv_id = self._make_cctv_id(inc, cctv)
-                extend_event = threading.Event()
-                self._extend_events[cctv_id] = extend_event
-                self._frame_buffers[cctv_id] = deque(maxlen=30)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                rec_dir = self._output_dir / f"{cctv_id}_{ts}"
+                frames_dir = rec_dir / "frames"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+
+                frame_idx = [0]
+
+                def save_frame(cf, d=frames_dir, idx=frame_idx):
+                    from PIL import Image as _Img
+                    path = d / f"{idx[0]:04d}.jpg"
+                    _Img.fromarray(cf.frame[:, :, ::-1]).save(
+                        str(path), "JPEG", quality=85,
+                    )
+                    idx[0] += 1
 
                 with self._lock:
                     self.stats["dwells"] += 1
 
-                self._capture.capture_dwelling(
+                frames = self._capture.capture_dwelling(
                     cctv=cctv,
                     incident=inc,
                     dwell_sec=OUTBREAK_DWELL_SEC,
                     fps=OUTBREAK_CAPTURE_FPS,
-                    on_frame=lambda cf, cid=cctv_id: self._on_dwelling_frame(cf, cid),
-                    extend_event=extend_event,
-                    extend_sec=OUTBREAK_DWELL_EXTEND_SEC,
+                    on_frame=save_frame,
                 )
 
-                self._finalize_recording(cctv_id, inc)
-                self._extend_events.pop(cctv_id, None)
-                self._frame_buffers.pop(cctv_id, None)
-                dwell_count += 1
+                n = frame_idx[0]
+                with self._lock:
+                    self.stats["frames_saved"] += n
 
+                if n > 0:
+                    metadata = {
+                        "cctv_id": cctv_id,
+                        "incident_type": inc.event_type,
+                        "road_name": inc.road_name,
+                        "message": inc.message,
+                        "cctv_name": cctv.get("name", ""),
+                        "distance": cctv.get("distance", ""),
+                        "captured_at": ts,
+                        "frame_count": n,
+                        "dwell_sec": OUTBREAK_DWELL_SEC,
+                        "fps": OUTBREAK_CAPTURE_FPS,
+                    }
+                    with open(rec_dir / "metadata.json", "w", encoding="utf-8") as f:
+                        json.dump(metadata, f, ensure_ascii=False, indent=2)
+                    with self._lock:
+                        self.stats["recordings"] += 1
+                    logger.info(
+                        "저장 완료: %s — %d프레임", rec_dir.name, n,
+                    )
+                else:
+                    shutil.rmtree(rec_dir, ignore_errors=True)
+
+                dwell_count += 1
                 if not self._stop_event.is_set():
                     time.sleep(OUTBREAK_CCTV_DELAY)
 
@@ -357,58 +331,6 @@ class OutbreakFeeder:
         logger.info(
             "OutbreakFeeder 순찰 완료: 사고 %d건, 체류 %d회",
             len(incidents), dwell_count,
-        )
-
-    def _on_dwelling_frame(self, captured_frame: Any, cctv_id: str):
-        frame_bgr = captured_frame.frame
-
-        buf = self._frame_buffers.get(cctv_id)
-        if buf is not None:
-            buf.append((time.time(), frame_bgr))
-
-        self._pipeline._on_frame(frame_bgr, cctv_id, tier=3)
-        with self._lock:
-            self.stats["frames_injected"] += 1
-
-        rec = self._recordings.get(cctv_id)
-        if rec:
-            from PIL import Image
-            idx = rec["frame_count"]
-            path = rec["dir"] / "frames" / f"{idx:04d}.jpg"
-            Image.fromarray(frame_bgr[:, :, ::-1]).save(
-                str(path), "JPEG", quality=85,
-            )
-            rec["frame_count"] = idx + 1
-
-    def _finalize_recording(self, cctv_id: str, incident: Any):
-        rec = self._recordings.pop(cctv_id, None)
-        if not rec:
-            return
-        if rec["frame_count"] == 0:
-            shutil.rmtree(rec["dir"], ignore_errors=True)
-            return
-
-        metadata = {
-            "cctv_id": cctv_id,
-            "incident_type": incident.event_type,
-            "road_name": incident.road_name,
-            "message": incident.message,
-            "started_at": datetime.fromtimestamp(rec["started_at"]).isoformat(),
-            "ended_at": datetime.now().isoformat(),
-            "frame_count": rec["frame_count"],
-            "trigger_count": len(rec["triggers"]),
-            "triggers": rec["triggers"],
-        }
-        meta_path = rec["dir"] / "metadata.json"
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-        with self._lock:
-            self.stats["recordings_saved"] += 1
-
-        logger.info(
-            "녹화 완료: %s — %d프레임, %d트리거",
-            rec["dir"].name, rec["frame_count"], len(rec["triggers"]),
         )
 
     @staticmethod
@@ -643,11 +565,6 @@ class NationwidePipeline:
         if trigger.type not in RECORD_TRIGGER_TYPES:
             return
         if trigger.severity < SEVERITY_GATE:
-            return
-
-        # Outbreak CCTV: 체류 연장 + 프레임 시퀀스 저장 (ffmpeg 녹화 불가)
-        if cctv_id.startswith("OB_") and self._outbreak_feeder:
-            self._outbreak_feeder.on_trigger(trigger, cctv_id)
             return
 
         recorder = self._recorders.get(cctv_id)
@@ -895,10 +812,10 @@ class NationwidePipeline:
 
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Vision 워커 스레드 시작 (Tier 2/3 프레임 큐 처리)
-        self._start_vision_workers()
-
         if not self._outbreak_only:
+            # Vision 워커 스레드 시작 (Tier 2/3 프레임 큐 처리)
+            self._start_vision_workers()
+
             # 핫스팟 선정
             hotspots = self._select_hotspots()
 
@@ -927,14 +844,12 @@ class NationwidePipeline:
             self._incident_reactor.start()
         else:
             logger.info("=" * 60)
-            logger.info("Outbreak 전용 모드 (StreamManager/IncidentReactor 비활성)")
-            logger.info("  Vision 워커: %d개", self._VISION_WORKERS)
+            logger.info("Outbreak 전용 모드 — 경량 캡처+저장 (Vision 파이프라인 미사용)")
             logger.info("=" * 60)
 
         # OutbreakFeeder 시작
         if OUTBREAK_ENABLED and _HAS_OUTBREAK:
             self._outbreak_feeder = OutbreakFeeder(
-                pipeline=self,
                 stop_event=self._stop_event,
             )
             if not self._outbreak_feeder.start():
@@ -1102,10 +1017,9 @@ class NationwidePipeline:
         ob = s.get("outbreak", {})
         if ob:
             logger.info(
-                "Outbreak: 순찰=%d 체류=%d 주입=%d 트리거=%d 녹화=%d",
+                "Outbreak: 순찰=%d 체류=%d 프레임=%d 녹화=%d",
                 ob.get("patrols", 0), ob.get("dwells", 0),
-                ob.get("frames_injected", 0), ob.get("triggers_received", 0),
-                ob.get("recordings_saved", 0),
+                ob.get("frames_saved", 0), ob.get("recordings", 0),
             )
         logger.info("-" * 50)
 
