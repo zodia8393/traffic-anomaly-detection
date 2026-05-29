@@ -65,6 +65,11 @@ from config_new import (
     OUTBREAK_MAX_PER_CYCLE,
     OUTBREAK_MAX_PER_INCIDENT,
     OUTBREAK_RECORDING_DIR,
+    OUTBREAK_MLLM_ENABLED,
+    OUTBREAK_MLLM_MODEL,
+    OUTBREAK_MLLM_MAX_IMAGES,
+    OUTBREAK_MLLM_QUEUE_SIZE,
+    DUCKDB_PATH,
 )
 from stream_manager import StreamManager
 from incident_reactor import IncidentReactor
@@ -156,10 +161,13 @@ class OutbreakFeeder:
 
     돌발정보 페이지의 CCTV는 이미 사고 확인된 현장이므로
     Vision 파이프라인(YOLO/ByteTrack/Trigger) 없이 프레임만 저장한다.
+    체류 완료 시 OutbreakMLLMWorker 큐에 프레임을 전달하여 분석+DB 적재.
     """
 
-    def __init__(self, stop_event: threading.Event):
+    def __init__(self, stop_event: threading.Event,
+                 mllm_worker: OutbreakMLLMWorker | None = None):
         self._stop_event = stop_event
+        self._mllm_worker = mllm_worker
         self._capture: OutbreakCCTVCapture | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -274,13 +282,16 @@ class OutbreakFeeder:
                 frames_dir.mkdir(parents=True, exist_ok=True)
 
                 frame_idx = [0]
+                frame_arrays = []
 
-                def save_frame(cf, d=frames_dir, idx=frame_idx):
+                def save_frame(cf, d=frames_dir, idx=frame_idx,
+                               arr=frame_arrays):
                     from PIL import Image as _Img
                     path = d / f"{idx[0]:04d}.jpg"
                     _Img.fromarray(cf.frame[:, :, ::-1]).save(
                         str(path), "JPEG", quality=85,
                     )
+                    arr.append(cf.frame.copy())
                     idx[0] += 1
 
                 with self._lock:
@@ -312,6 +323,7 @@ class OutbreakFeeder:
                         "cctv_id": cctv_id,
                         "incident_type": inc.event_type,
                         "road_name": inc.road_name,
+                        "direction": inc.direction,
                         "message": inc.message,
                         "incident_time": inc.incident_time,
                         "cctv_name": cctv.get("name", ""),
@@ -326,6 +338,11 @@ class OutbreakFeeder:
                         json.dump(metadata, f, ensure_ascii=False, indent=2)
                     with self._lock:
                         self.stats["recordings"] += 1
+
+                    if self._mllm_worker and frame_arrays:
+                        self._mllm_worker.enqueue(rec_dir, metadata,
+                                                  frame_arrays)
+
                     elapsed_str = ""
                     if elapsed_sec is not None:
                         m, s = divmod(int(elapsed_sec), 60)
@@ -355,6 +372,278 @@ class OutbreakFeeder:
         return f"OB_{sanitized}"
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# OutbreakMLLMWorker: 체류 완료 프레임 → MLLM 분석 → DuckDB 적재
+# ═══════════════════════════════════════════════════════════════════════
+
+class OutbreakMLLMWorker:
+    """체류 캡처 완료된 녹화 디렉토리를 큐에서 꺼내 MLLM 분석 + DB 적재."""
+
+    def __init__(self, stop_event: threading.Event):
+        self._stop_event = stop_event
+        self._queue: queue.Queue = queue.Queue(maxsize=OUTBREAK_MLLM_QUEUE_SIZE)
+        self._thread: threading.Thread | None = None
+        self._mllm_client = None
+        self._db_writer = None
+        self.stats = {
+            "analyzed": 0,
+            "db_inserted": 0,
+            "errors": 0,
+        }
+
+    def start(self) -> bool:
+        self._thread = threading.Thread(
+            target=self._worker_loop,
+            name="outbreak-mllm-worker",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("OutbreakMLLMWorker 시작 (model=%s, max_images=%d)",
+                     OUTBREAK_MLLM_MODEL, OUTBREAK_MLLM_MAX_IMAGES)
+        return True
+
+    def stop(self):
+        if self._thread:
+            self._thread.join(timeout=30)
+            self._thread = None
+        logger.info("OutbreakMLLMWorker 종료 | %s", self.stats)
+
+    def enqueue(self, rec_dir: Path, metadata: dict, frames: list):
+        """분석 대상을 큐에 추가. frames = list of numpy BGR arrays."""
+        try:
+            self._queue.put_nowait({
+                "rec_dir": rec_dir,
+                "metadata": metadata,
+                "frames": frames,
+            })
+        except queue.Full:
+            logger.warning("MLLM 분석 큐 포화, 건너뜀: %s", rec_dir.name)
+
+    def get_stats(self) -> dict:
+        return dict(self.stats)
+
+    def _worker_loop(self):
+        self._init_mllm()
+        self._init_db()
+
+        while not self._stop_event.is_set():
+            try:
+                item = self._queue.get(timeout=5)
+            except queue.Empty:
+                continue
+
+            try:
+                self._analyze_one(item)
+            except Exception as e:
+                self.stats["errors"] += 1
+                logger.error("MLLM 분석 오류: %s — %s",
+                             item.get("rec_dir", "?"), e, exc_info=True)
+
+    def _init_mllm(self):
+        """MLLM 클라이언트 초기화 (워커 스레드에서)."""
+        try:
+            sys.path.insert(0, str(ACCIDENT_SRC))
+            from layer3_mllm.mllm_client import MLLMClient
+            self._mllm_client = MLLMClient(
+                backend="transformers",
+                model_path=OUTBREAK_MLLM_MODEL,
+            )
+            logger.info("MLLM 클라이언트 초기화 완료: %s", OUTBREAK_MLLM_MODEL)
+        except Exception as e:
+            logger.error("MLLM 클라이언트 초기화 실패: %s", e)
+            self._mllm_client = None
+
+    def _init_db(self):
+        """DuckDB 연결 초기화."""
+        try:
+            from layer2_metadata.metadata_writer import MetadataWriter
+            self._db_writer = MetadataWriter(DUCKDB_PATH)
+            logger.info("DuckDB 연결 초기화 완료: %s", DUCKDB_PATH)
+        except Exception as e:
+            logger.error("DuckDB 초기화 실패: %s", e)
+            self._db_writer = None
+
+    def _analyze_one(self, item: dict):
+        """녹화 1건 분석: 프레임 선정 → MLLM 호출 → JSON 저장 → DB 적재."""
+        rec_dir: Path = item["rec_dir"]
+        metadata: dict = item["metadata"]
+        frames: list = item["frames"]
+
+        if not self._mllm_client:
+            logger.warning("MLLM 클라이언트 없음, 건너뜀: %s", rec_dir.name)
+            return
+
+        # 1) 대표 프레임 선정
+        selected = self._select_keyframes(frames, OUTBREAK_MLLM_MAX_IMAGES)
+        logger.info("대표 프레임 %d/%d장 선정: %s",
+                     len(selected), len(frames), rec_dir.name)
+
+        # 2) MLLM 프롬프트 메타 조립
+        elapsed_sec = metadata.get("elapsed_sec")
+        elapsed_min = round(elapsed_sec / 60, 1) if elapsed_sec else "불명"
+
+        prompt_meta = {
+            "road_name": metadata.get("road_name", ""),
+            "direction": metadata.get("direction", ""),
+            "incident_type": metadata.get("incident_type", ""),
+            "incident_time": metadata.get("incident_time", ""),
+            "elapsed_min": elapsed_min,
+            "cctv_name": metadata.get("cctv_name", ""),
+            "cctv_distance": metadata.get("distance", ""),
+            "frame_count": len(selected),
+        }
+
+        # 3) MLLM 호출
+        from layer3_mllm.prompts import build_messages
+        messages = build_messages("outbreak", selected, prompt_meta)
+        response = self._mllm_client.chat(messages, images=selected)
+
+        content = response.get("content", {})
+        latency = response.get("latency_sec", 0)
+        self.stats["analyzed"] += 1
+
+        # 4) 결과 검증 + 기본값 보완
+        result = self._validate_result(content)
+
+        # 5) analysis.json 저장
+        analysis_data = {
+            **result,
+            "mllm_model": OUTBREAK_MLLM_MODEL,
+            "mllm_latency_sec": round(latency, 1),
+            "analysis_frames": len(selected),
+            "metadata": metadata,
+        }
+        analysis_path = rec_dir / "analysis.json"
+        with open(analysis_path, "w", encoding="utf-8") as f:
+            json.dump(analysis_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(
+            "MLLM 분석 완료: %s — %s, 차량 %s대, 신뢰도 %.2f (%.1f초)",
+            rec_dir.name,
+            result.get("blockage_type", "?"),
+            result.get("vehicle_count", "?"),
+            result.get("confidence", 0),
+            latency,
+        )
+
+        # 6) DuckDB 적재
+        if self._db_writer:
+            self._insert_to_db(metadata, result, latency, len(selected),
+                               str(rec_dir))
+
+    def _insert_to_db(self, metadata: dict, result: dict, latency: float,
+                      n_frames: int, source_dir: str):
+        """분석 결과를 accidents 테이블에 INSERT."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        event_id = f"OB_{ts}_{metadata.get('cctv_id', 'unknown')}"
+
+        vehicles_json = result.get("vehicles", [])
+        lane_damage = None
+        blocked = result.get("blocked_lanes")
+        if blocked:
+            lane_damage = {f"차로_{i}": "유" for i in blocked}
+
+        report_time = None
+        if metadata.get("incident_time"):
+            try:
+                report_time = datetime.strptime(
+                    metadata["incident_time"], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+
+        accident_data = {
+            "event_id": event_id,
+            "video_id": metadata.get("cctv_id", ""),
+            "road_name": metadata.get("road_name", ""),
+            "direction": metadata.get("direction", ""),
+            "report_time": report_time,
+            "weather": result.get("weather"),
+            "report_source": "CCTV_outbreak",
+            "accident_type": metadata.get("incident_type", ""),
+            "cause": result.get("cause_estimated"),
+            "fire": result.get("fire", False),
+            "rollover": result.get("rollover", False),
+            "spill": result.get("cargo_spill", False),
+            "spill_type": result.get("cargo_type"),
+            "vehicles": vehicles_json,
+            "lane_damage": lane_damage,
+            "severity": result.get("severity"),
+            "mllm_report_json": result,
+            "report_path": source_dir + "/analysis.json",
+            "source": "outbreak",
+            "blockage_type": result.get("blockage_type"),
+            "description": result.get("description"),
+            "facility_damage": result.get("facility_damage"),
+            "elapsed_sec": metadata.get("elapsed_sec"),
+            "mllm_confidence": result.get("confidence"),
+            "mllm_model": OUTBREAK_MLLM_MODEL,
+            "mllm_latency_sec": latency,
+            "analysis_frames": n_frames,
+            "source_dir": source_dir,
+        }
+
+        try:
+            self._db_writer.write_accident(accident_data)
+            self.stats["db_inserted"] += 1
+            logger.info("DB 적재 완료: %s", event_id)
+        except Exception as e:
+            logger.error("DB 적재 실패: %s — %s", event_id, e)
+
+    @staticmethod
+    def _select_keyframes(frames: list, max_k: int) -> list:
+        """히스토그램 차이 기반으로 변화가 큰 대표 프레임 선정."""
+        import cv2
+        n = len(frames)
+        if n <= max_k:
+            return frames
+
+        diffs = []
+        for i in range(1, n):
+            h1 = cv2.calcHist([frames[i - 1]], [0], None, [64], [0, 256])
+            h2 = cv2.calcHist([frames[i]], [0], None, [64], [0, 256])
+            cv2.normalize(h1, h1)
+            cv2.normalize(h2, h2)
+            diff = cv2.compareHist(h1, h2, cv2.HISTCMP_BHATTACHARYYA)
+            diffs.append((i, diff))
+
+        diffs.sort(key=lambda x: x[1], reverse=True)
+        selected_idx = {0, n - 1}
+        for idx, _ in diffs:
+            if len(selected_idx) >= max_k:
+                break
+            selected_idx.add(idx)
+
+        return [frames[i] for i in sorted(selected_idx)]
+
+    @staticmethod
+    def _validate_result(content) -> dict:
+        """MLLM 응답 검증 + 기본값."""
+        if isinstance(content, str):
+            return {
+                "weather": None, "blockage_type": None, "blocked_lanes": [],
+                "vehicle_count": None, "vehicles": [],
+                "fire": False, "rollover": False, "cargo_spill": False,
+                "cause_estimated": None, "description": content,
+                "severity": None, "confidence": 0.3,
+            }
+
+        result = dict(content)
+        if not isinstance(result.get("vehicles"), list):
+            result["vehicles"] = []
+        if not isinstance(result.get("blocked_lanes"), list):
+            result["blocked_lanes"] = []
+        if not isinstance(result.get("facility_damage"), list):
+            result["facility_damage"] = []
+        for b in ("fire", "rollover", "cargo_spill"):
+            if not isinstance(result.get(b), bool):
+                result[b] = False
+        try:
+            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            result["confidence"] = 0.5
+        return result
+
+
 class NationwidePipeline:
     """363대 전국 CCTV 3-Tier 통합 파이프라인.
 
@@ -379,6 +668,7 @@ class NationwidePipeline:
             cctv_client=self._cctv_client,
             stop_event=self._stop_event,
         )
+        self._outbreak_mllm: OutbreakMLLMWorker | None = None
         self._outbreak_feeder: OutbreakFeeder | None = None
 
         self._prefilters: dict[str, PreFilter] = {}
@@ -862,10 +1152,20 @@ class NationwidePipeline:
             logger.info("Outbreak 전용 모드 — 경량 캡처+저장 (Vision 파이프라인 미사용)")
             logger.info("=" * 60)
 
-        # OutbreakFeeder 시작
+        # OutbreakMLLMWorker 시작 (MLLM 분석 + DB 적재)
+        if OUTBREAK_MLLM_ENABLED and OUTBREAK_ENABLED:
+            self._outbreak_mllm = OutbreakMLLMWorker(
+                stop_event=self._stop_event,
+            )
+            self._outbreak_mllm.start()
+        else:
+            self._outbreak_mllm = None
+
+        # OutbreakFeeder 시작 (MLLM 워커 연결)
         if OUTBREAK_ENABLED and _HAS_OUTBREAK:
             self._outbreak_feeder = OutbreakFeeder(
                 stop_event=self._stop_event,
+                mllm_worker=self._outbreak_mllm,
             )
             if not self._outbreak_feeder.start():
                 logger.warning("OutbreakFeeder 시작 실패 — 비활성화")
@@ -896,6 +1196,11 @@ class NationwidePipeline:
             logger.info("OutbreakFeeder 정지 중...")
             self._outbreak_feeder.stop()
             self._outbreak_feeder = None
+
+        if self._outbreak_mllm:
+            logger.info("OutbreakMLLMWorker 정지 중...")
+            self._outbreak_mllm.stop()
+            self._outbreak_mllm = None
 
         if not self._outbreak_only:
             logger.info("StreamManager 정지 중...")
@@ -974,6 +1279,8 @@ class NationwidePipeline:
 
         if self._outbreak_feeder:
             combined["outbreak"] = self._outbreak_feeder.get_stats()
+        if self._outbreak_mllm:
+            combined["outbreak_mllm"] = self._outbreak_mllm.get_stats()
 
         # 메모리 측정
         try:

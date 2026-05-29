@@ -174,6 +174,51 @@ CCTV 영상에서 판단 가능한 항목만 채우고, 현장 확인 필요 항
   }}
 }}"""
 
+# ── Task 5: 돌발정보 사고 현장 분석 (Outbreak) ──────────────────────
+
+OUTBREAK_REPORT_PROMPT = """\
+당신은 한국도로공사 교통사고 분석 전문가입니다.
+ITS 돌발정보 시스템에서 사고로 확인된 현장의 CCTV 영상 프레임을 분석합니다.
+
+사고 기본정보 (ITS 돌발정보):
+- 노선명: {road_name}
+- 방향: {direction}
+- 돌발 유형: {incident_type}
+- 사고 접보 시각: {incident_time}
+- 사고 후 경과: {elapsed_min}분
+- CCTV: {cctv_name} ({cctv_distance})
+
+제공된 CCTV 프레임({frame_count}장)을 분석하여 아래 항목을 JSON으로 작성하시오.
+영상에서 판단 불가능한 항목은 null로 표기:
+
+{{
+  "weather": "맑음 | 흐림 | 비 | 눈 | 안개",
+  "blockage_type": "전면차단 | 부분차단 | 갓길",
+  "blocked_lanes": [1, 2],
+  "lane_count": 2,
+  "road_geometry": "직선 | 곡선 | 터널 | 교량",
+  "vehicle_count": 1,
+  "vehicles": [
+    {{
+      "type": "승용차 | 화물차 | 버스 | 승합차 | 이륜차 | 특수차",
+      "size": "소형 | 중형 | 대형",
+      "cargo": "적재물 종류 또는 null",
+      "damage_state": "파손 | 전복 | 전도 | 정차 | 기타"
+    }}
+  ],
+  "fire": false,
+  "rollover": false,
+  "cargo_spill": false,
+  "cargo_type": null,
+  "facility_damage": [
+    {{"type": "가드레일 | 중분대 | 방음벽 | 표지판 | 기타", "detail": "설명"}}
+  ],
+  "cause_estimated": "주시태만 | 졸음운전 | 과속 | 안전거리미확보 | 차로변경 | 차량결함 | 낙하물 | 기상 | 기타",
+  "description": "사고 경위 추정 (3~5문장, 영상 기반)",
+  "severity": "경미 | 보통 | 중대 | 심각",
+  "confidence": 0.7
+}}"""
+
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────
 
 _SYSTEM_PROMPTS: dict[str, str] = {
@@ -199,6 +244,12 @@ _SYSTEM_PROMPTS: dict[str, str] = {
         "CCTV에서 판단 가능한 항목만 채우고, 현장 확인 필요 항목은 null로 표기하시오. "
         "반드시 JSON 형식으로만 응답하시오."
     ),
+    "outbreak": (
+        "당신은 한국도로공사 교통사고 현장 분석 전문가입니다. "
+        "ITS 돌발정보에서 사고로 확인된 CCTV 영상을 분석하여 "
+        "전면차단 사고 보고서 양식에 맞는 현장 정보를 추출합니다. "
+        "반드시 JSON 형식으로만 응답하시오."
+    ),
 }
 
 # 태스크 → 프롬프트 템플릿 매핑
@@ -207,6 +258,7 @@ _TASK_PROMPTS: dict[str, str] = {
     "accident": ACCIDENT_DETECTION_PROMPT,
     "classify": CLASS_CORRECTION_PROMPT,
     "report": REPORT_GENERATION_PROMPT,
+    "outbreak": OUTBREAK_REPORT_PROMPT,
 }
 
 

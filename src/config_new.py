@@ -121,5 +121,11 @@ OUTBREAK_MAX_PER_INCIDENT = 2        # 사고당 최대 CCTV 수
 OUTBREAK_ENABLED = True              # 활성화 플래그
 OUTBREAK_RECORDING_DIR = OUTPUT_DIR / "outbreak_recordings"
 
+# ── 돌발정보 MLLM 분석 ─────────────────────────────────────────────
+OUTBREAK_MLLM_ENABLED = True             # MLLM 분석 활성화
+OUTBREAK_MLLM_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"  # CPU 추론용 3B
+OUTBREAK_MLLM_MAX_IMAGES = 5             # MLLM에 전달할 대표 프레임 수
+OUTBREAK_MLLM_QUEUE_SIZE = 50            # 분석 큐 최대 크기
+
 # ── DuckDB ───────────────────────────────────────────────────────────
 DUCKDB_PATH = str(DATA_DIR / "accident.duckdb")

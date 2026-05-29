@@ -1,0 +1,72 @@
+[
+  {
+    "idx": 1,
+    "hotspot_name": "경부선_양재",
+    "hotspot_road": "경부선",
+    "cctv_name": "[경부선] 양재",
+    "cctv_road": "경부선",
+    "coordx": 127.042004,
+    "coordy": 37.461626,
+    "distance_km": 0.86,
+    "cctvurl": "https://cctvsec.ktict.co.kr/100/mKwdaZnT17FEHFA9H8TN0a+AMTcvhTT3W8Xzkp5u6YqYr7YgkQZK37wJG5tef4XJRKUGTEzBsS8Bmi/4oL/2A0whJAdm5cshaU5SiQI/Om4=",
+    "cctvtype": 4,
+    "cctvformat": "HLS",
+    "slug": "경부선_양재"
+  },
+  {
+    "idx": 2,
+    "hotspot_name": "경부선_판교",
+    "hotspot_road": "경부선",
+    "cctv_name": "[경부선] 백현",
+    "cctv_road": "경부선",
+    "coordx": 127.103568,
+    "coordy": 37.376041,
+    "distance_km": 0.54,
+    "cctvurl": "https://cctvsec.ktict.co.kr/2429/+3bmFw/S01msSIXsZ4LFeEFAiogmWfuYalP/wB4sm2/8aMubo15jbIpyH5Plr23+9N6mhbFHnU3duIuK5SxbL57dcjuUDCgg8p2Afs6YRbY=",
+    "cctvtype": 4,
+    "cctvformat": "HLS",
+    "slug": "경부선_판교"
+  },
+  {
+    "idx": 3,
+    "hotspot_name": "경부선_기흥",
+    "hotspot_road": "경부선",
+    "cctv_name": "[경부선] 공세육교",
+    "cctv_road": "경부선",
+    "coordx": 127.1038833,
+    "coordy": 37.24564199,
+    "distance_km": 2.21,
+    "cctvurl": "https://cctvsec.ktict.co.kr/515/QgIih+X7f4cjUj7c7owMFZvnVg1D9Fld8DP4Kk6+FjXVuhnEi/1SqIlexAHtx0uMo07MP2UtgNNhipcQRiHqqO4AcbQpHxOvklt8+ET6EB0=",
+    "cctvtype": 4,
+    "cctvformat": "HLS",
+    "slug": "경부선_기흥"
+  },
+  {
+    "idx": 4,
+    "hotspot_name": "경부선_안성",
+    "hotspot_road": "경부선",
+    "cctv_name": "[평택제천선] 궁리2교",
+    "cctv_road": "평택제천선",
+    "coordx": 127.0443567,
+    "coordy": 37.02470982,
+    "distance_km": 8.32,
+    "cctvurl": "https://cctvsec.ktict.co.kr/164/0WFacje2E5+rr4DMEzXuA/MoSRWQWH4Wf1pvKfUeIv+EvES0nVNgWVP/RKBaeQ8yruyBVf9JOEcfVFmh4cgSOQOhYZj7hbZ1J7HRAbIaka4=",
+    "cctvtype": 4,
+    "cctvformat": "HLS",
+    "slug": "경부선_안성"
+  },
+  {
+    "idx": 5,
+    "hotspot_name": "경부선_천안",
+    "hotspot_road": "경부선",
+    "cctv_name": "[당진청주선] 현충사대교 주탑",
+    "cctv_road": "당진청주선",
+    "coordx": 127.08259,
+    "coordy": 36.777649,
+    "distance_km": 2.93,
+    "cctvurl": "https://cctvsec.ktict.co.kr/94963/4je5YRXbxOnIVGqxSCBZJma7M3rUjyXU5M0UJ72/MgRWJ/ZSFqSxgPjrjnFL5CyMS2IcxBhp1uVTwwKgfXcMSO2AHdlQVIboht7ocLI0Ygg=",
+    "cctvtype": 4,
+    "cctvformat": "HLS",
+    "slug": "경부선_천안"
+  }
+]

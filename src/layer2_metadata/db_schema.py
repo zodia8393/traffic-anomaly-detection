@@ -75,9 +75,47 @@ def _create_tables(conn: duckdb.DuckDBPyConnection) -> None:
             severity            VARCHAR,
             mllm_response_id    VARCHAR,
             mllm_report_json    JSON,
-            report_path         VARCHAR
+            report_path         VARCHAR,
+            -- outbreak 전용 컬럼
+            source              VARCHAR DEFAULT 'pipeline',
+            blockage_type       VARCHAR,
+            description         TEXT,
+            facility_damage     JSON,
+            elapsed_sec         FLOAT,
+            mllm_confidence     FLOAT,
+            mllm_model          VARCHAR,
+            mllm_latency_sec    FLOAT,
+            analysis_frames     INTEGER,
+            source_dir          VARCHAR,
+            created_at          TIMESTAMP DEFAULT current_timestamp
         )
     """)
+
+    # 기존 테이블에 outbreak 컬럼 없으면 ALTER TABLE로 추가 (마이그레이션)
+    _migrate_accidents(conn)
+
+def _migrate_accidents(conn: duckdb.DuckDBPyConnection) -> None:
+    """기존 accidents 테이블에 outbreak 컬럼이 없으면 추가."""
+    existing = {row[0] for row in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='accidents'"
+    ).fetchall()}
+    migrations = [
+        ("source", "VARCHAR DEFAULT 'pipeline'"),
+        ("blockage_type", "VARCHAR"),
+        ("description", "TEXT"),
+        ("facility_damage", "JSON"),
+        ("elapsed_sec", "FLOAT"),
+        ("mllm_confidence", "FLOAT"),
+        ("mllm_model", "VARCHAR"),
+        ("mllm_latency_sec", "FLOAT"),
+        ("analysis_frames", "INTEGER"),
+        ("source_dir", "VARCHAR"),
+        ("created_at", "TIMESTAMP DEFAULT current_timestamp"),
+    ]
+    for col, dtype in migrations:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE accidents ADD COLUMN {col} {dtype}")
+
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS report_archive (

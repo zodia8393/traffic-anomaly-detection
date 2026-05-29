@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
@@ -315,8 +315,15 @@ def record_camera(cam_idx: int, cam_config: dict, hls_url: str,
         out_file = cam_dir / f"{slug}_{now.strftime('%Y%m%d_%H%M%S')}.ts"
         logger.info("[%d] 녹화 시작: %s → %s", cam_idx, cam_name, out_file.name)
 
-        # 이번 로테이션 구간의 녹화 시간 결정
-        rec_sec = rotation_sec if continuous else duration_sec
+        if continuous:
+            # 자정 기준 로테이션: 다음 00:00까지 남은 초
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            rec_sec = (midnight - now).total_seconds()
+            if rec_sec < 60:
+                rec_sec = 86400  # 자정 직전이면 다음날 통째로
+            logger.info("[%d] %s: 자정까지 %.0f분 (%.0f초)", cam_idx, slug, rec_sec / 60, rec_sec)
+        else:
+            rec_sec = duration_sec
 
         file_result = _record_one_file(
             cam_idx, slug, hls_url_ref, cam_config, out_file, rec_sec, session,

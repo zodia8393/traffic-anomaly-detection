@@ -122,7 +122,8 @@ class MetadataWriter:
         accident_data : dict
             event_id 필수. 나머지는 accidents 테이블 컬럼명과 동일한 키.
         """
-        json_cols = ("vehicles", "casualties", "lane_damage", "mllm_report_json")
+        json_cols = ("vehicles", "casualties", "lane_damage",
+                     "mllm_report_json", "facility_damage")
         vals: dict[str, Any] = {}
         for k, v in accident_data.items():
             if k in json_cols and v is not None and not isinstance(v, str):
@@ -130,20 +131,6 @@ class MetadataWriter:
             else:
                 vals[k] = v
 
-        sql = """
-            INSERT OR REPLACE INTO accidents (
-                event_id, video_id,
-                road_name, direction, km_post, branch, point_type,
-                report_time, weather, report_source,
-                accident_type, cause, fire, rollover, spill, spill_type,
-                vehicles, casualties, lane_damage, congestion_km,
-                severity, mllm_response_id, mllm_report_json, report_path
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?
-            )
-        """
         cols = [
             "event_id", "video_id",
             "road_name", "direction", "km_post", "branch", "point_type",
@@ -151,7 +138,13 @@ class MetadataWriter:
             "accident_type", "cause", "fire", "rollover", "spill", "spill_type",
             "vehicles", "casualties", "lane_damage", "congestion_km",
             "severity", "mllm_response_id", "mllm_report_json", "report_path",
+            "source", "blockage_type", "description", "facility_damage",
+            "elapsed_sec", "mllm_confidence", "mllm_model", "mllm_latency_sec",
+            "analysis_frames", "source_dir",
         ]
+        placeholders = ", ".join("?" for _ in cols)
+        col_names = ", ".join(cols)
+        sql = f"INSERT OR REPLACE INTO accidents ({col_names}) VALUES ({placeholders})"
         self._conn.execute(sql, [vals.get(c) for c in cols])
 
     # ------------------------------------------------------------------

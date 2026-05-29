@@ -1,0 +1,14 @@
+{
+  "cctv_id": "OB_남해제2지선__용곡육교_0.3km",
+  "incident_type": "고장",
+  "road_name": "남해2지선",
+  "message": "남해2지선 고장 2026-05-26 10:37:10",
+  "incident_time": "2026-05-26 10:37:10",
+  "cctv_name": "[남해제2지선] 용곡육교 0.3km",
+  "distance": "0.3km",
+  "captured_at": "20260526_104040",
+  "elapsed_sec": 210.0,
+  "frame_count": 30,
+  "dwell_sec": 30,
+  "fps": 1.0
+}

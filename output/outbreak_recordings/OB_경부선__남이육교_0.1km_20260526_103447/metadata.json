@@ -1,0 +1,12 @@
+{
+  "cctv_id": "OB_경부선__남이육교_0.1km",
+  "incident_type": "고장",
+  "road_name": "경부선",
+  "message": "경부선 고장 2026-05-26 10:30:23",
+  "cctv_name": "[경부선] 남이육교 0.1km",
+  "distance": "0.1km",
+  "captured_at": "20260526_103447",
+  "frame_count": 30,
+  "dwell_sec": 30,
+  "fps": 1.0
+}
