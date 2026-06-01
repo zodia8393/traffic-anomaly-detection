@@ -1,0 +1,24 @@
+[Unit]
+# CCTV HLS 연속 녹화 — systemd 자동재시작 (워치독 대안/보강)
+# 설치(사용자 sudo 필요):
+#   sudo cp deploy/cctv-recording.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cctv-recording
+# 상태: systemctl status cctv-recording / journalctl -u cctv-recording -f
+Description=CCTV HLS Continuous Recording (사고분석)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ybs
+WorkingDirectory=/workspace/prj_cctv/사고분석_설계/src/layer0_data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 record_hls_multi.py --config /tmp/cameras_5routes.json --continuous
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/DATA/cctv_recording/record_continuous.log
+StandardError=append:/DATA/cctv_recording/record_continuous.log
+
+[Install]
+WantedBy=multi-user.target
