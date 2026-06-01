@@ -4,14 +4,16 @@
 """
 
 from pathlib import Path
+import os
 import sys
 
-# 기존 파이프라인 경로 추가
-PIPELINE_SRC = Path("/workspace/prj_cctv/pipeline/src")
-sys.path.insert(0, str(PIPELINE_SRC))
+# 루트 경로 — 환경변수로 오버라이드 가능 (배포 이식성). 미설정 시 기본값.
+ROOT = Path(os.environ.get("CCTV_PRJ_ROOT", "/workspace/prj_cctv"))
+NEW_ROOT = Path(os.environ.get("CCTV_ANALYSIS_ROOT", str(ROOT / "사고분석_설계")))
 
-ROOT = Path("/workspace/prj_cctv")
-NEW_ROOT = ROOT / "사고분석_설계"
+# 기존 파이프라인 경로 추가
+PIPELINE_SRC = Path(os.environ.get("CCTV_PIPELINE_SRC", str(ROOT / "pipeline" / "src")))
+sys.path.insert(0, str(PIPELINE_SRC))
 SRC_DIR = NEW_ROOT / "src"
 DATA_DIR = NEW_ROOT / "data"
 MODEL_DIR = NEW_ROOT / "models"

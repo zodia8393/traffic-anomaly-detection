@@ -113,7 +113,15 @@ class RuleEngine:
             key=lambda v: SEVERITY_SCORES.get(v.severity, 0),
             reverse=True,
         )
+        self._purge_inactive()
         return violations
+
+    def _purge_inactive(self) -> None:
+        """비활성 트랙의 persistence 키 제거 — 무한 증가(메모리 누수) 차단."""
+        active = set(self._store.active_track_ids) if self._store else set()
+        stale = [k for k in self._persistence if k[1] not in active]
+        for k in stale:
+            del self._persistence[k]
 
     def _eval_single(self, rule: RuleSpec) -> list[RuleViolation]:
         violations = []

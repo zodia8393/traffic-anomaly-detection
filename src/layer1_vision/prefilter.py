@@ -207,11 +207,16 @@ class PreFilter:
             cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
         )
 
+        # 정지객체 최소면적을 프레임 크기에 비례화(0.5%) — 고해상도(2K) 과소탐지 방지.
+        # 640x480에서 ~1536px로 기존 고정값(1500)과 호환.
+        frame_area = fg_mask.shape[0] * fg_mask.shape[1]
+        static_min_area = max(_STATIC_MIN_AREA, frame_area * 0.005)
+
         # 현재 프레임에서 발견된 큰 blob의 양자화 좌표
         current_keys: set[tuple[int, int]] = set()
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < _STATIC_MIN_AREA:
+            if area < static_min_area:
                 continue
             m = cv2.moments(cnt)
             if m["m00"] == 0:

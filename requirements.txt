@@ -1,0 +1,17 @@
+# CCTV 사고분석 파이프라인 의존성 (버전 고정 — 학습모델 호환성)
+# 생성: 2026-06-01 (pip freeze 기반 핵심 추출)
+torch==2.11.0
+scikit-learn==1.8.0
+xgboost==3.2.0
+duckdb==1.5.1
+opencv-python==4.13.0.92
+ultralytics==8.4.33
+transformers==5.5.0
+numpy==2.4.3
+requests==2.32.3
+playwright==1.58.0
+openpyxl==3.1.5
+python-dotenv==1.2.2
+Pillow==11.3.0
+psutil>=5.9
+PyYAML>=6.0
