@@ -63,7 +63,8 @@ class SpeedEstimator:
         if self._H is not None:
             pt = np.array([px, py, 1.0], dtype=np.float64)
             world = self._H @ pt
-            if abs(world[2]) < 1e-9:
+            # Z≈0 근처는 사영 발산(지평선 부근) — 1e-8로 상향, 발산 시 폴백
+            if abs(world[2]) < 1e-8:
                 return px * self._scale_m_per_px, py * self._scale_m_per_px
             return float(world[0] / world[2]), float(world[1] / world[2])
         return px * self._scale_m_per_px, py * self._scale_m_per_px
@@ -110,4 +111,13 @@ class SpeedEstimator:
     @property
     def has_homography(self) -> bool:
         """호모그래피 행렬 보유 여부."""
+        return self._H is not None
+
+    @property
+    def is_calibrated(self) -> bool:
+        """실세계 캘리브레이션(호모그래피) 보유 여부.
+
+        False면 산출 속도는 픽셀 스케일 폴백(상대값) — 절대 km/h로
+        신뢰할 수 없으므로 MLLM 입력·보고서의 '절대속도'에서 제외해야 한다.
+        """
         return self._H is not None

@@ -68,6 +68,9 @@ class TriggerDetector:
         # T1 TTC 연속 감지 카운터: {(track_a, track_b): 연속 프레임 수}
         self._ttc_streak: dict[tuple[int, int], int] = {}
 
+        # 직전 프레임 타임스탬프 (T2 가속도 실제 dt 계산용)
+        self._prev_timestamp: float | None = None
+
         # 마지막 주기적 트리거 시각
         self._last_periodic: float = 0.0
 
@@ -101,6 +104,7 @@ class TriggerDetector:
         events.extend(self._check_speed_variance(frame_idx, timestamp, speeds))
         events.extend(self._check_periodic(frame_idx, timestamp))
 
+        self._prev_timestamp = timestamp
         return events
 
     def _is_cooled_down(self, trigger_type: str, timestamp: float) -> bool:
@@ -167,16 +171,22 @@ class TriggerDetector:
         if not self._is_cooled_down("T2", timestamp):
             return []
 
+        # 실제 프레임 간격(dt)으로 가속도 계산 — 프레임드롭/가변fps 대응.
+        # 직전 타임스탬프가 없거나 비정상이면 1초로 폴백.
+        if self._prev_timestamp is not None:
+            dt = timestamp - self._prev_timestamp
+            if dt <= 0 or dt > 10:  # 비정상(시계역행/장기공백) 폴백
+                dt = 1.0
+        else:
+            dt = 1.0
+
         for tid, speed_list in speeds.items():
             if len(speed_list) < 2:
                 continue
-            # 최근 2프레임 속도차 -> 가속도 근사 (km/h -> m/s, /dt)
+            # 최근 2프레임 속도차 -> 가속도 (km/h -> m/s, 실제 dt로 나눔)
             v_curr = speed_list[-1] / 3.6
             v_prev = speed_list[-2] / 3.6
-            # dt 가정: 1/fps, 여기서는 속도 리스트 간격 = 1프레임 간격으로 가정
-            # 정밀한 dt는 caller가 timestamp 간격으로 넘겨야 하지만,
-            # 여기서는 1초 간격 근사 (1fps CCTV 기준)
-            accel = v_curr - v_prev  # m/s^2 (dt=1s 가정)
+            accel = (v_curr - v_prev) / dt  # m/s^2
 
             if accel <= TRIGGER_DECEL_THRESHOLD:
                 severity = min(1.0, abs(accel) / abs(TRIGGER_DECEL_THRESHOLD))
