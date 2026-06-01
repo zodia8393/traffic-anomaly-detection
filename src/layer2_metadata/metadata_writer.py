@@ -5,6 +5,7 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,12 +17,55 @@ from .db_schema import init_db
 
 logger = logging.getLogger(__name__)
 
+# DB 쓰기 실패 시 재시도/내구성 정책
+_WRITE_RETRIES = 3
+_WRITE_RETRY_SLEEP = 0.3  # 초 (DB locked 등 일시적 오류 대비)
+
 
 class MetadataWriter:
-    """트랙, MLLM 응답, 사고 이벤트, 교통류 집계를 DB에 적재한다."""
+    """트랙, MLLM 응답, 사고 이벤트, 교통류 집계를 DB에 적재한다.
+
+    DB 쓰기 실패 시 즉시 폐기하지 않고 재시도 후, 그래도 실패하면
+    디스크 데드레터(JSONL)에 기록하여 영구 손실을 방지한다.
+    recover_deadletter()로 추후 재적재 가능.
+    """
 
     def __init__(self, db_path: str = DUCKDB_PATH) -> None:
         self._conn: duckdb.DuckDBPyConnection = init_db(db_path)
+        self._deadletter_dir = L2_EXPORTS / "_deadletter"
+
+    # ------------------------------------------------------------------
+    # 내구성 있는 실행 (재시도 + 데드레터)
+    # ------------------------------------------------------------------
+    def _execute_durable(self, sql: str, params: list, kind: str, record: dict) -> bool:
+        """execute를 재시도하고, 최종 실패 시 데드레터에 기록한다.
+
+        Returns True if written to DB, False if routed to deadletter.
+        """
+        last_err: Exception | None = None
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                self._conn.execute(sql, params)
+                return True
+            except Exception as e:  # noqa: BLE001 — DB locked/디스크 등 모든 실패 포착
+                last_err = e
+                if attempt < _WRITE_RETRIES - 1:
+                    time.sleep(_WRITE_RETRY_SLEEP * (attempt + 1))
+        # 최종 실패 → 데드레터로 보존 (프로세스 사망에도 살아남음)
+        self._to_deadletter(kind, record, last_err)
+        return False
+
+    def _to_deadletter(self, kind: str, record: dict, err: Exception | None) -> None:
+        try:
+            self._deadletter_dir.mkdir(parents=True, exist_ok=True)
+            fp = self._deadletter_dir / f"{kind}_{datetime.now():%Y%m%d}.jsonl"
+            entry = {"ts": datetime.now().isoformat(), "error": str(err), "record": record}
+            with open(fp, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            logger.error("DB 쓰기 실패 → 데드레터 보존: %s (%s)", kind, err)
+        except Exception as e:  # 데드레터마저 실패하면 최소한 로그로 남김
+            logger.critical("데드레터 기록 실패 — 레코드 유실 위험: %s | record=%s | err=%s",
+                            e, record, err)
 
     # ------------------------------------------------------------------
     # tracks
@@ -98,7 +142,7 @@ class MetadataWriter:
                 latency_sec, model_id, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        self._conn.execute(sql, [
+        self._execute_durable(sql, [
             response_data["response_id"],
             response_data.get("video_id"),
             response_data.get("trigger_type"),
@@ -108,8 +152,8 @@ class MetadataWriter:
             output_json,
             response_data.get("latency_sec"),
             response_data.get("model_id"),
-            response_data.get("created_at"),
-        ])
+            response_data.get("created_at") or datetime.now(),
+        ], "mllm_responses", response_data)
 
     # ------------------------------------------------------------------
     # accidents
@@ -131,6 +175,7 @@ class MetadataWriter:
             else:
                 vals[k] = v
 
+        vals.setdefault("created_at", datetime.now())
         cols = [
             "event_id", "video_id",
             "road_name", "direction", "km_post", "branch", "point_type",
@@ -140,12 +185,12 @@ class MetadataWriter:
             "severity", "mllm_response_id", "mllm_report_json", "report_path",
             "source", "blockage_type", "description", "facility_damage",
             "elapsed_sec", "mllm_confidence", "mllm_model", "mllm_latency_sec",
-            "analysis_frames", "source_dir",
+            "analysis_frames", "source_dir", "created_at",
         ]
         placeholders = ", ".join("?" for _ in cols)
         col_names = ", ".join(cols)
         sql = f"INSERT OR REPLACE INTO accidents ({col_names}) VALUES ({placeholders})"
-        self._conn.execute(sql, [vals.get(c) for c in cols])
+        self._execute_durable(sql, [vals.get(c) for c in cols], "accidents", accident_data)
 
     # ------------------------------------------------------------------
     # traffic_agg
@@ -166,7 +211,7 @@ class MetadataWriter:
                 truck_ratio, risk_score, mllm_scene
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
-        self._conn.execute(sql, [
+        self._execute_durable(sql, [
             agg_data["ic_name"],
             agg_data["period_start"],
             agg_data.get("volume"),
@@ -175,7 +220,47 @@ class MetadataWriter:
             agg_data.get("truck_ratio"),
             agg_data.get("risk_score"),
             agg_data.get("mllm_scene"),
-        ])
+        ], "traffic_agg", agg_data)
+
+    # ------------------------------------------------------------------
+    # 데드레터 복구
+    # ------------------------------------------------------------------
+    def recover_deadletter(self) -> int:
+        """데드레터 JSONL의 보존 레코드를 재적재 시도한다.
+
+        성공한 레코드가 든 파일은 .done 으로 이동. 반환: 재적재 성공 건수.
+        """
+        if not self._deadletter_dir.exists():
+            return 0
+        writers = {
+            "mllm_responses": self.write_mllm_response,
+            "accidents": self.write_accident,
+            "traffic_agg": self.write_traffic_agg,
+        }
+        recovered = 0
+        for fp in sorted(self._deadletter_dir.glob("*.jsonl")):
+            kind = fp.stem.rsplit("_", 1)[0]
+            writer = writers.get(kind)
+            if writer is None:
+                continue
+            remaining = []
+            for line in fp.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)["record"]
+                    writer(rec)  # 다시 _execute_durable 경유 — 실패 시 새 데드레터로
+                    recovered += 1
+                except Exception as e:  # noqa: BLE001
+                    remaining.append(line)
+                    logger.warning("데드레터 복구 실패(보류): %s", e)
+            if remaining:
+                fp.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+            else:
+                fp.rename(fp.with_suffix(".jsonl.done"))
+        if recovered:
+            logger.info("데드레터 복구: %d건 재적재", recovered)
+        return recovered
 
     # ------------------------------------------------------------------
     # DB 내보내기

@@ -282,13 +282,15 @@ class FeatureEngineer:
         """
         conn = duckdb.connect(self.db_path, read_only=True)
         try:
-            # 대상 구간 조회
+            # 대상 구간 조회 (INTERVAL 플레이스홀더는 DuckDB 파서 오류 →
+            # cutoff를 Python에서 계산해 파라미터로 전달)
+            cutoff = datetime.now() - timedelta(days=period_days)
             rows = conn.execute("""
                 SELECT DISTINCT ic_name, period_start
                 FROM traffic_agg
-                WHERE period_start >= current_timestamp - INTERVAL ? DAY
+                WHERE period_start >= ?
                 ORDER BY ic_name, period_start
-            """, [period_days]).fetchall()
+            """, [cutoff]).fetchall()
 
             if not rows:
                 logger.warning("traffic_agg 데이터 없음 (최근 %d일)", period_days)
