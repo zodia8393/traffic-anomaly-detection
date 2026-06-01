@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -24,6 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ITS_BASE, STREAM_DIR
+
+# ── ITS API 회복력 정책 ──
+_API_MIN_INTERVAL = 1.0      # 요청 간 최소 간격(초) — 전역 레이트리밋
+_API_MAX_RETRIES = 3         # 일시적 오류 재시도 횟수
+_API_BACKOFF_BASE = 1.0      # 지수 백오프 시작(초): 1,2,4...
+_API_BACKOFF_MAX = 60.0      # 백오프 상한(초)
+_CB_FAIL_THRESHOLD = 5       # 연속 실패 N회 → 서킷 오픈
+_CB_OPEN_SEC = 600.0         # 서킷 오픈 유지(초) — 쿼터 소진 대비 10분 쿨다운
+_QUOTA_CODES = {4001}        # "개인 제한량 초과" 등 쿼터 코드
 
 logger = logging.getLogger(__name__)
 
@@ -70,23 +80,68 @@ class ITSIncidentClient:
         "etc": "기타",
     }
 
+    # 전역(클래스 레벨) 레이트리밋·서킷브레이커 상태 — 여러 카메라 스레드 공유
+    _rate_lock = threading.Lock()
+    _last_request_ts = 0.0
+    _consecutive_fails = 0
+    _circuit_open_until = 0.0
+
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("ITS_API_KEY", "")
         self.base_url = ITS_BASE
 
+    @classmethod
+    def _rate_limit(cls) -> None:
+        """요청 간 최소 간격 강제 (전역)."""
+        with cls._rate_lock:
+            wait = _API_MIN_INTERVAL - (time.time() - cls._last_request_ts)
+            if wait > 0:
+                time.sleep(wait)
+            cls._last_request_ts = time.time()
+
+    @classmethod
+    def _circuit_open(cls) -> bool:
+        return time.time() < cls._circuit_open_until
+
+    @classmethod
+    def _record_success(cls) -> None:
+        cls._consecutive_fails = 0
+
+    @classmethod
+    def _record_failure(cls, quota: bool = False) -> None:
+        cls._consecutive_fails += 1
+        if quota or cls._consecutive_fails >= _CB_FAIL_THRESHOLD:
+            cls._circuit_open_until = time.time() + _CB_OPEN_SEC
+            logger.error("ITS API 서킷 오픈 (%.0f초) — 연속실패=%d quota=%s",
+                         _CB_OPEN_SEC, cls._consecutive_fails, quota)
+
     def fetch_incidents(self, event_type: str = "acc",
                         road_type: str = "all") -> list[IncidentEvent]:
-        """현재 돌발상황 조회.
+        """현재 돌발상황 조회 (하위호환 — 실패 시 빈 리스트).
 
-        Args:
-            event_type: "acc"(교통사고) | "all"(전체) | "cor"(공사) 등
-            road_type: "all"(전체) | "ex"(고속도로) | "its"(국도) 등
+        주의: 빈 리스트가 'API 오류'와 '진짜 0건'을 구분하지 못한다.
+        삭제/판정에 쓰는 호출은 fetch_incidents_status()를 사용할 것.
+        """
+        _ok, events = self.fetch_incidents_status(event_type, road_type)
+        return events
+
+    def fetch_incidents_status(self, event_type: str = "acc",
+                               road_type: str = "all") -> tuple[bool, list[IncidentEvent]]:
+        """현재 돌발상황 조회 (회복력 + 상태 구분).
+
+        Returns:
+            (ok, events). ok=False면 API 오류/서킷오픈 → '0건'이 아니라 '미상'.
+            호출자는 ok=False일 때 '사고 없음'으로 단정해 영상 삭제 금지.
         """
         import requests
 
         if not self.api_key:
             logger.warning("ITS_API_KEY 미설정")
-            return []
+            return False, []
+
+        if self._circuit_open():
+            logger.warning("ITS API 서킷 오픈 중 — 요청 스킵")
+            return False, []
 
         url = f"{self.base_url}/eventInfo"
         params = {
@@ -100,20 +155,41 @@ class ITSIncidentClient:
             "getType": "json",
         }
 
-        try:
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error("ITS 돌발상황 API 실패: %s", e)
-            return []
+        data = None
+        for attempt in range(_API_MAX_RETRIES):
+            self._rate_limit()
+            try:
+                resp = requests.get(url, params=params, timeout=15)
+                # 쿼터/레이트(429) 또는 서버오류(5xx) → 백오프 재시도
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    raise requests.HTTPError(f"HTTP {resp.status_code}")
+                resp.raise_for_status()
+                payload = resp.json()
+                code = payload.get("header", {}).get("resultCode", -1)
+                if code in _QUOTA_CODES:
+                    msg = payload.get("header", {}).get("resultMsg", "")
+                    logger.error("ITS API 쿼터: code=%s msg=%s", code, msg)
+                    self._record_failure(quota=True)
+                    return False, []
+                if code != 0:
+                    msg = payload.get("header", {}).get("resultMsg", "")
+                    logger.error("ITS API 오류: code=%s msg=%s", code, msg)
+                    self._record_failure()
+                    return False, []
+                data = payload
+                break
+            except Exception as e:  # noqa: BLE001 — 네트워크/HTTP/파싱 모두
+                backoff = min(_API_BACKOFF_BASE * (2 ** attempt), _API_BACKOFF_MAX)
+                if attempt < _API_MAX_RETRIES - 1:
+                    logger.warning("ITS API 실패(%d/%d): %s — %.0f초 후 재시도",
+                                   attempt + 1, _API_MAX_RETRIES, e, backoff)
+                    time.sleep(backoff)
+                else:
+                    logger.error("ITS 돌발상황 API 최종 실패: %s", e)
+                    self._record_failure()
+                    return False, []
 
-        result_code = data.get("header", {}).get("resultCode", -1)
-        if result_code != 0:
-            msg = data.get("header", {}).get("resultMsg", "")
-            logger.error("ITS API 오류: code=%s msg=%s", result_code, msg)
-            return []
-
+        self._record_success()
         events = []
         items = data.get("body", {}).get("items", [])
         for item in items:
@@ -135,7 +211,7 @@ class ITSIncidentClient:
             ))
 
         logger.info("ITS 돌발상황: %d건 조회 (eventType=%s)", len(events), event_type)
-        return events
+        return True, events
 
 
 class IncidentPoller:

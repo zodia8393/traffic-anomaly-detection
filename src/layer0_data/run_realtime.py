@@ -439,6 +439,7 @@ class IncidentVerifier:
         self._last_check: dict[str, float] = {}
         self._cached_incidents: list[IncidentEvent] = []
         self._cache_age: float = 0.0
+        self.api_uncertain: bool = False  # 마지막 조회가 API오류/서킷오픈이면 True
 
     def verify(self, lat: float, lon: float,
                trigger_type: str, radius_km: float = ITS_CHECK_RADIUS_KM
@@ -461,13 +462,17 @@ class IncidentVerifier:
 
         # 캐시 갱신 (30초 이상 경과 시)
         if (now - self._cache_age) > 30:
-            try:
-                self._cached_incidents = self.client.fetch_incidents(event_type="acc")
-                self._cache_age = now
-                logger.info("ITS 사고 목록 갱신: %d건", len(self._cached_incidents))
-            except Exception as e:
-                logger.error("ITS API 조회 실패: %s", e)
+            ok, events = self.client.fetch_incidents_status(event_type="acc")
+            self.api_uncertain = not ok
+            if not ok:
+                # API 오류/서킷오픈 → '사고 없음'으로 단정 불가 (오삭제 방지)
+                logger.error("ITS API 조회 불가 — 판정 미상(uncertain)")
                 return False, None
+            self._cached_incidents = events
+            self._cache_age = now
+            logger.info("ITS 사고 목록 갱신: %d건", len(self._cached_incidents))
+        else:
+            self.api_uncertain = False
 
         # 반경 내 사고 검색
         for incident in self._cached_incidents:
@@ -702,7 +707,13 @@ class RealtimeAccidentPipeline:
 
         if confirmed and incident and video_path:
             self._save_confirmed(event_id, trigger, cctv, incident, video_path)
-        elif video_path and video_path.exists() and trigger.severity >= SEVERITY_PENDING:
+        elif video_path and video_path.exists() and (
+            trigger.severity >= SEVERITY_PENDING or self.verifier.api_uncertain
+        ):
+            # API 미상(uncertain)이면 severity 무관 보존 — 진짜 사고를 오삭제하지 않음
+            if self.verifier.api_uncertain:
+                logger.warning("ITS 미상 → 보존(pending): %s sev=%.2f",
+                               event_id, trigger.severity)
             self._handle_pending(event_id, trigger, cctv, video_path)
         else:
             self._save_deleted(event_id, trigger, cctv, video_path)
