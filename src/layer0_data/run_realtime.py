@@ -87,120 +87,25 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 설정 상수
+# 설정 상수 — 임계값은 realtime_constants.py로 분리(단일 출처).
+# 경로 상수(SAVE_DIR 등)는 STREAM_DIR 의존이라 여기서 산출.
 # ═══════════════════════════════════════════════════════════════════════
+from realtime_constants import (
+    SAMPLE_FPS,
+    ITS_CHECK_RADIUS_KM, ITS_CHECK_COOLDOWN_SEC,
+    SEVERITY_GATE, SEVERITY_PENDING, SEVERITY_FORCE_PRESERVE,
+    PENDING_MAX_RETRIES, PENDING_RETRY_INTERVAL_SEC,
+    RECORD_TRIGGER_TYPES,
+    CONSENSUS_WINDOW_SEC, CONSENSUS_MIN_TYPES, INSTANT_RECORD_TYPES,
+)
+from frame_sampler import FrameSampler
+from collection_record import CollectionRecord
 
-SAMPLE_FPS = 1                   # Vision Pipeline 입력 fps (CPU 부하 관리)
-ITS_CHECK_RADIUS_KM = 10.0      # 트리거 발화 시 ITS 사고 매칭 반경 (km)
-ITS_CHECK_COOLDOWN_SEC = 60     # 동일 트리거 유형 ITS 확인 쿨다운
 SAVE_DIR = STREAM_DIR / "accident_clips"
 META_DIR = STREAM_DIR / "metadata"
 LOG_DIR = STREAM_DIR / "realtime_logs"
 MULTI_STATUS_FILE = LOG_DIR / "multi_status.json"
 PENDING_DIR = STREAM_DIR / "pending"
-
-SEVERITY_GATE = 0.5              # 녹화 시작 최소 severity (v3: 0.3 → v4: 0.5)
-SEVERITY_PENDING = 0.7           # ITS 미확인 시 pending 보존 최소 severity
-SEVERITY_FORCE_PRESERVE = 0.8    # 재확인 실패해도 보존하는 최소 severity
-PENDING_MAX_RETRIES = 3          # pending 재확인 최대 횟수
-PENDING_RETRY_INTERVAL_SEC = 600 # pending 재확인 간격 (10분)
-
-# 녹화 트리거 대상 (T7 주기적 스냅샷 제외)
-RECORD_TRIGGER_TYPES = {"T1", "T2", "T3", "T4", "T5", "T6"}
-
-# 다중 트리거 합의 (v4)
-CONSENSUS_WINDOW_SEC = 5.0       # 합의 윈도우 (초)
-CONSENSUS_MIN_TYPES = 2          # 최소 트리거 종류 수
-INSTANT_RECORD_TYPES = {"T5"}    # 단독 즉시 녹화 (다수 동시 감속)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 프레임 샘플러: HLS -> 1fps numpy 프레임
-# ═══════════════════════════════════════════════════════════════════════
-
-class FrameSampler:
-    """HLS/RTSP 스트림에서 지정 fps로 프레임을 샘플링한다.
-
-    내부적으로 ffmpeg subprocess를 사용하여 raw 프레임을 읽는다.
-    cv2.VideoCapture 대비 HLS 호환성이 좋고, 실패 시 자동 재연결.
-    """
-
-    def __init__(self, stream_url: str, sample_fps: int = SAMPLE_FPS,
-                 width: int = 640, height: int = 480):
-        self.stream_url = stream_url
-        self.sample_fps = sample_fps
-        self.width = width
-        self.height = height
-        self._process: subprocess.Popen | None = None
-        self._running = False
-        self._frame_count = 0
-
-    def start(self) -> bool:
-        """스트림 연결 시작. 성공 시 True."""
-        cmd = [
-            "ffmpeg",
-            "-loglevel", "error",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_on_network_error", "1",
-            "-reconnect_delay_max", "10",
-            "-rw_timeout", "15000000",
-            "-fflags", "+discardcorrupt",
-            "-i", self.stream_url,
-            "-vf", f"fps={self.sample_fps},scale={self.width}:{self.height}",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-",
-        ]
-        try:
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=self.width * self.height * 3 * 2,
-            )
-            self._running = True
-            self._frame_count = 0
-            logger.info("FrameSampler 시작: %s (%dfps, %dx%d)",
-                        self.stream_url[:80], self.sample_fps, self.width, self.height)
-            return True
-        except Exception as e:
-            logger.error("FrameSampler 시작 실패: %s", e)
-            return False
-
-    def read_frame(self) -> tuple[bool, Any]:
-        """1프레임 읽기. (success, numpy_bgr_image)."""
-        if not self._running or self._process is None:
-            return False, None
-
-        import numpy as np
-
-        nbytes = self.width * self.height * 3
-        raw = self._process.stdout.read(nbytes)
-        if len(raw) != nbytes:
-            return False, None
-
-        frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-            (self.height, self.width, 3)
-        )
-        self._frame_count += 1
-        return True, frame
-
-    def stop(self):
-        """스트림 종료."""
-        self._running = False
-        if self._process:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-            self._process = None
-        logger.info("FrameSampler 종료 (총 %d프레임)", self._frame_count)
-
-    @property
-    def is_running(self) -> bool:
-        return self._running and self._process is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -490,34 +395,8 @@ class IncidentVerifier:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 메타데이터 기록기
+# 메타데이터 기록기 (CollectionRecord는 collection_record.py로 분리)
 # ═══════════════════════════════════════════════════════════════════════
-
-@dataclass
-class CollectionRecord:
-    """수집 기록."""
-    event_id: str
-    trigger_type: str
-    trigger_description: str
-    trigger_frame: int
-    trigger_severity: float
-    cctv_id: str
-    cctv_name: str
-    cctv_lat: float
-    cctv_lon: float
-    incident_id: str | None = None
-    incident_road: str | None = None
-    incident_message: str | None = None
-    incident_lat: float | None = None
-    incident_lon: float | None = None
-    match_distance_km: float | None = None
-    video_path: str | None = None
-    video_size_mb: float | None = None
-    video_duration_sec: float | None = None
-    its_verified: bool = False
-    action: str = ""               # "confirmed" | "pending_preserved" | "deleted"
-    collected_at: str = ""
-
 
 def save_collection_record(record: CollectionRecord):
     """수집 기록을 JSONL로 저장."""
