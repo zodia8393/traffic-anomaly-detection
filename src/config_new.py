@@ -85,6 +85,24 @@ ANOMALY_CAMERA_CONFIGS = NEW_ROOT / "configs" / "cameras"
 ANOMALY_ALERT_THRESHOLD = 0.3
 ANOMALY_ALARM_THRESHOLD = 0.7
 
+# ── ML 앙상블 활성화 게이트 (Level 2~4) ───────────────────────────────
+# 기본 OFF. 미검증/저성능 모델이 사고판정을 오염시키지 않도록 전제조건 통과 모델만 투표.
+ENABLE_ML_ENSEMBLE = False           # 전체 ML 앙상블 마스터 스위치
+ML_MIN_AUROC = 0.60                  # 활성화 최소 AUROC (미달 시 격리)
+# 각 레벨: (모델파일, eval파일(있으면 AUROC 검사), 기본활성)
+ML_MODEL_GATES = {
+    "level2_iforest": {"path": MODEL_DIR / "iforest_l2.pkl", "eval": None, "enabled": True},
+    "level3_lstm":    {"path": MODEL_DIR / "lstm_ae_l3.pt",  "eval": None, "enabled": True},
+    # STGAE: AUROC 0.495(랜덤) — 명시적 격리. 재학습으로 0.6+ 달성 전까지 weight=0.
+    "level4_stgae":   {"path": MODEL_DIR / "stgae_aihub",
+                       "eval": MODEL_DIR / "stgae_aihub" / "eval_summary.json", "enabled": False},
+}
+
+# ── 미배선 모듈 활성화 플래그 (실수 활성화 방지) ──────────────────────
+ENABLE_LAYER4_PREDICTION = False     # XGBoost 사고예측 — 학습데이터/모델 준비 후 True
+ENABLE_RAG = False                   # RAG 보강 — 미배선
+ENABLE_SELF_TRAINING = False         # 자기강화 루프 — 미배선
+
 # ── 전국 스케일업 (3-Tier) ────────────────────────────────────────────
 NATIONWIDE_MAX_CAMERAS = 1600        # 전체 가동 기본 상한 (RAM 40GB 기준, ITS 4760대 중)
 TIER2_HOTSPOT_COUNT = 50             # Tier 2 핫스팟 상시 정밀 감시 대수

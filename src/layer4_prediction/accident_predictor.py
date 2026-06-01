@@ -135,14 +135,19 @@ class AccidentPredictor:
 
         Returns:
             {"probability": float, "risk_level": str}.
-
-        Raises:
-            RuntimeError: 모델 미로드 시.
+            Layer4 미활성(ENABLE_LAYER4_PREDICTION=False) 또는 모델 미로드 시
+            안전 폴백(probability=0, risk_level="unavailable")을 반환한다.
         """
         import xgboost as xgb
 
-        if self.model is None:
-            raise RuntimeError("모델이 로드되지 않음. load() 또는 train() 먼저 호출")
+        try:
+            from config_new import ENABLE_LAYER4_PREDICTION
+        except Exception:  # noqa: BLE001
+            ENABLE_LAYER4_PREDICTION = False
+
+        # 미활성/미로드 시 크래시 대신 안전 폴백 (실수 배선 방지)
+        if not ENABLE_LAYER4_PREDICTION or self.model is None:
+            return {"probability": 0.0, "risk_level": "unavailable"}
 
         if self.feature_names:
             vec = [float(features.get(fn, 0.0)) for fn in self.feature_names]

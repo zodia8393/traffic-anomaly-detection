@@ -47,6 +47,23 @@ class EnsembleScorer:
         self.alarm_threshold = alarm_threshold
         self.ml_vote_threshold = ml_vote_threshold
         self.ml_confidence_threshold = ml_confidence_threshold
+        # 활성화 게이트 통과 모델만 ML 투표 허용 (STGAE 등 미검증 모델 격리)
+        try:
+            from .activation_gate import active_ml_models
+            self._active_ml = active_ml_models()
+        except Exception as e:  # noqa: BLE001 — 게이트 로드 실패 시 ML 전면 차단(안전)
+            logger.warning("활성화 게이트 로드 실패, ML 비활성: %s", e)
+            self._active_ml = set()
+
+    def _gate_ml(self, ml_scores: dict[str, float]) -> dict[str, float]:
+        """게이트 미통과 모델(STGAE 등)을 ML 점수에서 제외."""
+        if not ml_scores:
+            return {}
+        gated = {k: v for k, v in ml_scores.items() if k in self._active_ml}
+        dropped = set(ml_scores) - set(gated)
+        if dropped:
+            logger.debug("ML 게이트 제외: %s", dropped)
+        return gated
 
     def score(
         self,
@@ -62,7 +79,8 @@ class EnsembleScorer:
         Returns:
             EnsembleResult.
         """
-        ml_scores = ml_scores or {}
+        # 활성화 게이트: 검증 통과 모델만 투표 (STGAE 등 격리)
+        ml_scores = self._gate_ml(ml_scores or {})
 
         if not rule_violations and not ml_scores:
             return EnsembleResult(
