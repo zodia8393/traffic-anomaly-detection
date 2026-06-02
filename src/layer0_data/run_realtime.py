@@ -1960,11 +1960,17 @@ def main():
                     key, val = line.split("=", 1)
                     os.environ.setdefault(key.strip(), val.strip())
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # 로그 로테이션(100MB×5) — 무한 증가(211MB+) 방지. log_setup은 src에 있음.
+    try:
+        from log_setup import setup_logging
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        setup_logging(logfile=str(LOG_DIR / "run_realtime.log"), level=logging.INFO)
+    except Exception:  # 헬퍼 로드 실패 시 기존 방식 폴백
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
 
     parser = argparse.ArgumentParser(
         description="실시간 사고영상 수집 파이프라인 (v2 — 징조 기반 온디맨드 녹화)",

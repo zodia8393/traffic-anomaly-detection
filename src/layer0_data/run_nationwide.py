@@ -1409,11 +1409,17 @@ def main():
                     key, val = line.split("=", 1)
                     os.environ.setdefault(key.strip(), val.strip())
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # 로그 로테이션(100MB×5) — 무한 증가(monitor_v4.log 211MB+) 방지.
+    try:
+        from log_setup import setup_logging
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        setup_logging(logfile=str(LOG_DIR / "run_nationwide.log"), level=logging.INFO)
+    except Exception:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
     # 노이즈 억제: 개별 스트림/프레임/파이프라인 → 에러만 (요약 리포트에서 집계 확인)
     for name in ("run_realtime", "stream", "layer1_vision.vision_pipeline"):
         logging.getLogger(name).setLevel(logging.ERROR)
