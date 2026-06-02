@@ -352,6 +352,9 @@ class VisionPipeline:
                 "involved_tracks": involved_info,
                 "ttc_info": relevant_ttc,
                 "speed_info": speed_info,
+                # 캘리브레이션 없으면 속도는 픽셀폴백(상대값) — 절대 km/h 신뢰불가.
+                # 하위(MLLM 입력·보고서)에서 절대속도 제외 판단 근거.
+                "speed_calibrated": self.speed_est.is_calibrated,
             },
         }
 

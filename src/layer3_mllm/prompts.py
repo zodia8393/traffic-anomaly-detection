@@ -281,8 +281,15 @@ def build_messages(
         valid = ", ".join(_TASK_PROMPTS)
         raise ValueError(f"알 수 없는 태스크: {task} (유효: {valid})")
 
-    meta = metadata or {}
+    meta = dict(metadata or {})
     template = _TASK_PROMPTS[task]
+
+    # 미보정 속도 제외: 캘리브레이션이 없으면 절대속도(km/h)는 물리적 무의미하므로
+    # MLLM 입력에서 '측정불가(미보정)'로 표시 (오판 유발 방지).
+    # speed_calibrated 미지정(None)이면 기존 동작 유지(하위호환).
+    if meta.get("speed_calibrated") is False:
+        meta["avg_speed"] = "측정불가(미보정)"
+        meta["speed_changes"] = meta.get("speed_changes") or "측정불가(미보정)"
 
     # 메타데이터로 플레이스홀더 채우기 (누락 키는 빈 문자열)
     try:

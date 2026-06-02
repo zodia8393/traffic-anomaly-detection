@@ -61,7 +61,7 @@ class AccidentDetectorMLLM:
                 "raw_response": dict,
             }
         """
-        # 메타데이터 조립
+        # 메타데이터 조립 (speed_calibrated 전파 — 미보정 속도는 build_messages에서 제외)
         metadata = {
             "trigger_type": trigger_event.get("trigger_type", ""),
             "ttc_values": _format_list(trigger_event.get("ttc_values", [])),
@@ -69,6 +69,7 @@ class AccidentDetectorMLLM:
             "track_summaries": _format_tracks(
                 tracks_metadata.get("track_summaries", [])
             ),
+            "speed_calibrated": tracks_metadata.get("speed_calibrated", True),
         }
 
         messages = build_messages("accident", keyframes, metadata)
