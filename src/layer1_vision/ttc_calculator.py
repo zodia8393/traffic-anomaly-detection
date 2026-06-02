@@ -8,12 +8,23 @@ from __future__ import annotations
 
 import math
 from itertools import combinations
-from typing import Any
+from typing import Any, Callable
+
+# 픽셀→실세계(m) 변환 콜러블 타입. None이면 픽셀 기반(원근 미보정).
+ToWorld = Callable[[float, float], "tuple[float, float]"]
 
 
-def _bbox_center(bbox: list[float] | tuple[float, ...]) -> tuple[float, float]:
-    """bbox [x1, y1, x2, y2]의 중심 좌표."""
-    return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+def _bbox_center(bbox: list[float] | tuple[float, ...],
+                 to_world: ToWorld | None = None) -> tuple[float, float]:
+    """bbox [x1, y1, x2, y2]의 중심 좌표. to_world 제공 시 실세계(m)로 변환.
+
+    캘리브레이션이 있으면 원근 보정된 실세계 좌표를 반환하여, 거리/접근속도
+    계산이 화면 위치(원근)에 왜곡되지 않게 한다.
+    """
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    if to_world is not None:
+        return to_world(cx, cy)
+    return cx, cy
 
 
 def _center_distance(c1: tuple[float, float], c2: tuple[float, float]) -> float:
@@ -24,6 +35,7 @@ def _center_distance(c1: tuple[float, float], c2: tuple[float, float]) -> float:
 def compute_ttc(
     track_a: list[dict[str, Any]],
     track_b: list[dict[str, Any]],
+    to_world: ToWorld | None = None,
 ) -> float | None:
     """두 트랙 간 TTC 산출.
 
@@ -33,6 +45,7 @@ def compute_ttc(
     Args:
         track_a: 차량 A의 시간순 트랙 기록.
         track_b: 차량 B의 시간순 트랙 기록.
+        to_world: 픽셀→실세계(m) 변환. 제공 시 원근 보정된 실거리로 TTC 계산.
 
     Returns:
         TTC(초). 접근하지 않으면 None.
@@ -44,10 +57,10 @@ def compute_ttc(
     a_prev, a_curr = track_a[-2], track_a[-1]
     b_prev, b_curr = track_b[-2], track_b[-1]
 
-    ca_prev = _bbox_center(a_prev["bbox"])
-    ca_curr = _bbox_center(a_curr["bbox"])
-    cb_prev = _bbox_center(b_prev["bbox"])
-    cb_curr = _bbox_center(b_curr["bbox"])
+    ca_prev = _bbox_center(a_prev["bbox"], to_world)
+    ca_curr = _bbox_center(a_curr["bbox"], to_world)
+    cb_prev = _bbox_center(b_prev["bbox"], to_world)
+    cb_curr = _bbox_center(b_curr["bbox"], to_world)
 
     dist_prev = _center_distance(ca_prev, cb_prev)
     dist_curr = _center_distance(ca_curr, cb_curr)
@@ -95,29 +108,33 @@ def _is_same_lane(
 def compute_all_ttc(
     tracks: dict[int, list[dict[str, Any]]],
     lane_filter: bool = True,
+    to_world: ToWorld | None = None,
 ) -> list[dict[str, Any]]:
     """전체 트랙 페어의 TTC를 계산한다.
 
     Args:
         tracks: {tracker_id: [{"bbox": [...], "timestamp": float}, ...]}
         lane_filter: True면 같은 차선(bbox X-overlap) 쌍만 계산.
+        to_world: 픽셀→실세계(m) 변환. 제공 시 원근 보정 TTC.
 
     Returns:
-        list of {"track_a": int, "track_b": int, "ttc": float}
+        list of {"track_a": int, "track_b": int, "ttc": float, "calibrated": bool}
         TTC가 None인 페어는 제외.
     """
     results: list[dict[str, Any]] = []
     active_ids = [tid for tid, history in tracks.items() if len(history) >= 2]
+    calibrated = to_world is not None
 
     for tid_a, tid_b in combinations(active_ids, 2):
         if lane_filter and not _is_same_lane(tracks[tid_a], tracks[tid_b]):
             continue
-        ttc = compute_ttc(tracks[tid_a], tracks[tid_b])
+        ttc = compute_ttc(tracks[tid_a], tracks[tid_b], to_world)
         if ttc is not None:
             results.append({
                 "track_a": tid_a,
                 "track_b": tid_b,
                 "ttc": ttc,
+                "calibrated": calibrated,
             })
 
     # TTC 오름차순 정렬 (위험도 높은 순)

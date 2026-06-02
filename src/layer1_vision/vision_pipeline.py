@@ -191,7 +191,7 @@ class VisionPipeline:
                         self._speed_history[tid] = self._speed_history[tid][-300:]
 
         # 6. TTC 계산
-        ttc_list = compute_all_ttc(self._track_history)
+        ttc_list = compute_all_ttc(self._track_history, to_world=self.speed_est.world_transform)
 
         # 7. 트리거 판정
         tracks_info = {
@@ -327,7 +327,7 @@ class VisionPipeline:
             })
 
         # 현재 TTC 정보
-        ttc_info = compute_all_ttc(self._track_history)
+        ttc_info = compute_all_ttc(self._track_history, to_world=self.speed_est.world_transform)
         # 트리거 관련 트랙의 TTC만 필터
         relevant_ttc = [
             t for t in ttc_info

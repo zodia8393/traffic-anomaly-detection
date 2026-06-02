@@ -121,3 +121,19 @@ class SpeedEstimator:
         신뢰할 수 없으므로 MLLM 입력·보고서의 '절대속도'에서 제외해야 한다.
         """
         return self._H is not None
+
+    def to_world(self, px: float, py: float) -> tuple[float, float]:
+        """픽셀 좌표를 실세계 좌표(m)로 변환 (공개 API).
+
+        호모그래피 보유 시 원근 보정된 실세계 m, 없으면 픽셀×스케일 폴백.
+        TTC 등 거리 기반 계산의 원근 보정에 사용.
+        """
+        return self._pixel_to_world(px, py)
+
+    @property
+    def world_transform(self):
+        """캘리브레이션 보유 시 to_world 콜러블, 없으면 None.
+
+        TTC 계산기 등에 넘겨 '보정 시에만' 실세계 변환을 적용하기 위함.
+        """
+        return self.to_world if self._H is not None else None
