@@ -27,7 +27,8 @@ class IncidentReactor:
         self._cctv_client = cctv_client
         self._stop_event = stop_event
         self._incident_client = ITSIncidentClient()
-        self._known_incidents: set[str] = set()
+        # {event_id: first_seen_monotonic} — TTL로 정리(무한증가 방지)
+        self._known_incidents: dict[str, float] = {}
         self._active_reactions: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -58,7 +59,7 @@ class IncidentReactor:
                     with self._lock:
                         if ev.event_id in self._known_incidents:
                             continue
-                        self._known_incidents.add(ev.event_id)
+                        self._known_incidents[ev.event_id] = time.monotonic()
                     self._react(ev)
                 self._cleanup_expired()
             except Exception as e:
@@ -159,6 +160,16 @@ class IncidentReactor:
                 "사고 반응 만료: event_id=%s — CCTV %d대 강등 (%.0f초 경과)",
                 event_id, len(reaction["cctv_ids"]), elapsed,
             )
+
+        # _known_incidents TTL 정리 (무한증가 방지). TTL 경과 후 재발생 시 재반응 허용.
+        ttl = max(3600.0, INCIDENT_HOLD_SEC * 6)  # 최소 1시간
+        with self._lock:
+            stale = [eid for eid, seen in self._known_incidents.items()
+                     if now - seen > ttl]
+            for eid in stale:
+                del self._known_incidents[eid]
+        if stale:
+            logger.debug("known_incidents TTL 정리: %d건", len(stale))
 
     def get_stats(self) -> dict:
         """현재 반응 통계."""

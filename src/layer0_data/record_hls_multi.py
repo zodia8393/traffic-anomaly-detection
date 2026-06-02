@@ -357,6 +357,12 @@ def record_camera(cam_idx: int, cam_config: dict, hls_url: str,
             logger.info("[%d] %s: MP4 변환 완료 대기 중...", cam_idx, slug)
             ct.join(timeout=300)
 
+    # HTTP 세션 정리 (커넥션 풀 해제)
+    try:
+        session.close()
+    except Exception:
+        pass
+
     # 최종 결과: 마지막 파일 기준 (continuous에서는 누적)
     if all_files:
         last = all_files[-1]

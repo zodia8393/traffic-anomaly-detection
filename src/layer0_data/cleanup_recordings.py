@@ -47,6 +47,12 @@ def cleanup(root: Path, keep_days: int, dry_run: bool) -> tuple[int, float]:
     for d in sorted(root.iterdir()):
         if not d.is_dir() or not DATE_DIR_RE.match(d.name):
             continue
+        # 실제 유효 날짜인지 검증 (regex만으론 20240230 같은 가짜 통과)
+        try:
+            datetime.strptime(d.name, "%Y%m%d")
+        except ValueError:
+            logger.warning("유효하지 않은 날짜 디렉토리 무시: %s", d.name)
+            continue
         if d.name >= cutoff:  # 문자열 비교 = 날짜 비교 (YYYYMMDD)
             continue
         size_gb = sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) / (1024 ** 3)
