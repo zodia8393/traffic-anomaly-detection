@@ -11,7 +11,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .trajectory_features import extract_features
+try:
+    from .trajectory_features import extract_features
+except ImportError:  # 스크립트 직접 실행 시
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parent))
+    from trajectory_features import extract_features
 
 logger = logging.getLogger(__name__)
 
