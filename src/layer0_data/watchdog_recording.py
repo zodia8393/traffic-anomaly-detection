@@ -26,10 +26,13 @@ HERE = Path(__file__).resolve().parent
 CONFIG = "/tmp/cameras_5routes.json"
 REC_LOG = "/DATA/cctv_recording/record_continuous.log"
 STATUS = Path("/DATA/cctv_recording/watchdog_status.json")
+REC_ROOT = Path("/DATA/cctv_recording")
 PROC_PATTERN = "record_hls_multi.py"
 DISK_PATH = "/DATA"
 DISK_CRIT_GB = 30    # 이 미만이면 위험 (녹화 곧 중단)
 DISK_WARN_GB = 100   # 이 미만이면 경고
+CAMERA_STALE_SEC = 300   # 활성 .ts가 이 시간 이상 미갱신이면 카메라 비활성 판정
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")  # 미설정 시 로그만
 
 
 def is_running() -> tuple[bool, int | None]:
@@ -74,7 +77,8 @@ def check_disk() -> tuple[float, str]:
     return free_gb, "ok"
 
 
-def write_status(running: bool, pid, free_gb: float, disk_state: str, action: str) -> None:
+def write_status(running: bool, pid, free_gb: float, disk_state: str, action: str,
+                 stale_cameras: list | None = None) -> None:
     status = {
         "ts": datetime.now().isoformat(),
         "recording": running,
@@ -82,6 +86,7 @@ def write_status(running: bool, pid, free_gb: float, disk_state: str, action: st
         "disk_free_gb": round(free_gb, 1),
         "disk_state": disk_state,
         "action": action,
+        "stale_cameras": stale_cameras or [],
     }
     try:
         STATUS.write_text(json.dumps(status, ensure_ascii=False, indent=2))
@@ -89,21 +94,77 @@ def write_status(running: bool, pid, free_gb: float, disk_state: str, action: st
         logger.warning("상태 기록 실패: %s", e)
 
 
+def check_cameras() -> list[str]:
+    """오늘 날짜 디렉토리의 활성 .ts가 갱신 멈춘 카메라(비활성) 목록 반환."""
+    import time
+    today = datetime.now().strftime("%Y%m%d")
+    day_dir = REC_ROOT / today
+    if not day_dir.exists():
+        return []
+    stale = []
+    now = time.time()
+    for cam_dir in day_dir.glob("*_hls"):
+        ts_files = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)
+        if not ts_files:
+            stale.append(cam_dir.name.replace("_hls", "") + "(파일없음)")
+            continue
+        latest = ts_files[-1]
+        if now - latest.stat().st_mtime > CAMERA_STALE_SEC:
+            mins = (now - latest.stat().st_mtime) / 60
+            stale.append(f"{cam_dir.name.replace('_hls','')}({mins:.0f}분 미갱신)")
+    return stale
+
+
+def send_alert(message: str) -> None:
+    """경고 알림 — webhook 설정 시 POST, 항상 로그."""
+    logger.error("🔔 ALERT: %s", message)
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        import requests
+        requests.post(ALERT_WEBHOOK_URL, json={"text": f"[CCTV 녹화] {message}"}, timeout=10)
+    except Exception as e:
+        logger.warning("webhook 알림 실패: %s", e)
+
+
+def systemd_manages() -> bool:
+    """systemd cctv-recording 서비스가 관리 중인지 (재시작 충돌 방지)."""
+    try:
+        out = subprocess.run(["systemctl", "is-active", "cctv-recording"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() in ("active", "activating")
+    except Exception:
+        return False
+
+
 def main():
     running, pid = is_running()
     action = "none"
     if not running:
-        logger.error("녹화 프로세스 없음 — 재시작 시도")
-        pid = restart_recording()
-        action = "restarted" if pid else "restart_failed"
-        running = pid is not None
+        if systemd_manages():
+            # systemd가 30초 내 자동 재시작 — 워치독은 중복 기동 금지(모니터링만)
+            logger.warning("녹화 프로세스 일시 부재 — systemd 재시작 대기(중복 기동 안 함)")
+            action = "systemd_managed"
+        else:
+            logger.error("녹화 프로세스 없음 — 재시작 시도")
+            pid = restart_recording()
+            action = "restarted" if pid else "restart_failed"
+            running = pid is not None
     else:
         logger.info("녹화 정상 가동 PID=%s", pid)
 
     free_gb, disk_state = check_disk()
-    write_status(running, pid, free_gb, disk_state, action)
+    stale = check_cameras()
+    write_status(running, pid, free_gb, disk_state, action, stale_cameras=stale)
 
-    # cron 모니터링/알림이 종료코드로 감지할 수 있게
+    # 알림 조건: 재시작 실패 / 디스크 위험 / 비활성 카메라
+    if action == "restart_failed":
+        send_alert("녹화 프로세스 재시작 실패 — 수동 확인 필요")
+    if disk_state == "crit":
+        send_alert(f"디스크 위험: {free_gb:.0f}GB 남음 — 녹화 중단 임박")
+    if stale:
+        send_alert(f"비활성 카메라 {len(stale)}대: {', '.join(stale)}")
+
     if action == "restart_failed" or disk_state == "crit":
         sys.exit(2)
 
