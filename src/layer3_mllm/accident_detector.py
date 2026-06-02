@@ -61,15 +61,16 @@ class AccidentDetectorMLLM:
                 "raw_response": dict,
             }
         """
-        # 메타데이터 조립 (speed_calibrated 전파 — 미보정 속도는 build_messages에서 제외)
+        # 메타데이터 조립 (speed_calibrated 전파 — 미보정 속도는 제외/마스킹)
+        speed_calibrated = tracks_metadata.get("speed_calibrated", True)
         metadata = {
             "trigger_type": trigger_event.get("trigger_type", ""),
             "ttc_values": _format_list(trigger_event.get("ttc_values", [])),
             "speed_changes": _format_list(trigger_event.get("speed_changes", [])),
             "track_summaries": _format_tracks(
-                tracks_metadata.get("track_summaries", [])
+                tracks_metadata.get("track_summaries", []), speed_calibrated
             ),
-            "speed_calibrated": tracks_metadata.get("speed_calibrated", True),
+            "speed_calibrated": speed_calibrated,
         }
 
         messages = build_messages("accident", keyframes, metadata)
@@ -163,7 +164,7 @@ def _format_list(items: list) -> str:
     return ", ".join(str(x) for x in items)
 
 
-def _format_tracks(tracks: str | list) -> str:
+def _format_tracks(tracks: str | list, speed_calibrated: bool = True) -> str:
     """궤적 요약을 프롬프트 텍스트로 변환."""
     if isinstance(tracks, str):
         return tracks
@@ -174,8 +175,12 @@ def _format_tracks(tracks: str | list) -> str:
         if isinstance(t, dict):
             tid = t.get("track_id", "?")
             cls = t.get("class", "?")
-            speed = t.get("avg_speed", "?")
-            lines.append(f"  - Track {tid}: {cls}, 평균속도 {speed} km/h")
+            if speed_calibrated:
+                speed = t.get("avg_speed", "?")
+                lines.append(f"  - Track {tid}: {cls}, 평균속도 {speed} km/h")
+            else:
+                # 미보정 — 절대속도 신뢰불가, 마스킹
+                lines.append(f"  - Track {tid}: {cls}, 평균속도 측정불가(미보정)")
         else:
             lines.append(f"  - {t}")
     return "\n".join(lines)

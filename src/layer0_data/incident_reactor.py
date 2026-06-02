@@ -114,7 +114,8 @@ class IncidentReactor:
         cctv_ids: list[str] = []
 
         for cctv, dist_km in nearest:
-            self._stream_manager.promote(cctv.cctv_id, to_tier=3)
+            # 사고 편입은 INCIDENT_HOLD_SEC(10분) 유지 — 프리필터 기본 60초 강제 버그 수정
+            self._stream_manager.promote(cctv.cctv_id, to_tier=3, hold_sec=INCIDENT_HOLD_SEC)
             cctv_ids.append(cctv.cctv_id)
             logger.info(
                 "  승격 T3: %s (%.1fkm) — %s",

@@ -327,11 +327,12 @@ class StreamManager:
 
         return started
 
-    def promote(self, cctv_id: str, to_tier: int = 3):
+    def promote(self, cctv_id: str, to_tier: int = 3, hold_sec: float | None = None):
         """Tier 승격 (1->3 또는 2->3).
 
         Tier 3 동시 분석 상한(TIER3_MAX_CONCURRENT) 초과 시 거부.
-        승격된 카메라는 PREFILTER_TIER3_HOLD_SEC 후 자동 강등.
+        승격된 카메라는 hold_sec(기본 PREFILTER_TIER3_HOLD_SEC) 후 자동 강등.
+        ITS 사고 편입처럼 더 길게 유지하려면 hold_sec를 명시(예: INCIDENT_HOLD_SEC).
         """
         with self._lock:
             current = self.tier_map.get(cctv_id)
@@ -358,11 +359,10 @@ class StreamManager:
             if worker:
                 worker.tier = to_tier
 
-            # 자동 강등 타이머 설정 (Tier 3만)
+            # 자동 강등 타이머 설정 (Tier 3만). hold_sec 미지정 시 프리필터 기본값.
             if to_tier == 3:
-                self._tier3_expiry[cctv_id] = (
-                    time.monotonic() + PREFILTER_TIER3_HOLD_SEC
-                )
+                hold = PREFILTER_TIER3_HOLD_SEC if hold_sec is None else hold_sec
+                self._tier3_expiry[cctv_id] = time.monotonic() + hold
 
         logger.info("승격: %s T%d -> T%d", cctv_id, current, to_tier)
 

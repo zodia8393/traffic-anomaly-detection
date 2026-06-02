@@ -848,8 +848,14 @@ class NationwidePipeline:
         return pipeline
 
     def _cleanup_pipeline(self, cctv_id: str) -> None:
-        """Tier 3 -> Tier 1 강등 시 파이프라인 + 녹화기 제거."""
+        """Tier 3 -> Tier 1 강등 시 파이프라인 + 녹화기 제거.
+
+        lock 안에서 현재 tier를 재확인 — 호출 직후 재승격(Tier2/3)된 경우
+        갓 생성된 파이프라인을 잘못 삭제하지 않도록 가드한다(race 방지).
+        """
         with self._lock:
+            if self._stream_manager.tier_map.get(cctv_id, 1) >= 2:
+                return  # 재승격됨 — cleanup 취소
             self._vision_pipelines.pop(cctv_id, None)
             self._recorders.pop(cctv_id, None)
             self._trigger_windows.pop(cctv_id, None)
