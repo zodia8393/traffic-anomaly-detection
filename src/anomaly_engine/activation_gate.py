@@ -26,11 +26,19 @@ logger = logging.getLogger(__name__)
 
 
 def _best_auroc(eval_path: Path | None) -> float | None:
-    """eval_summary.json에서 최고 AUROC 추출 (없으면 None = 검사 생략)."""
+    """eval json에서 AUROC 추출 (두 형식 지원, 없으면 None = 검사 생략).
+
+    형식1(STGAE): {epoch: {"auroc": x, ...}, ...} → 최고값
+    형식2(지도감지기): {"auroc": x, ...} → 그 값
+    """
     if eval_path is None or not Path(eval_path).exists():
         return None
     try:
         data = json.loads(Path(eval_path).read_text())
+        # 형식2: 최상위에 auroc
+        if "auroc" in data and isinstance(data["auroc"], (int, float)):
+            return float(data["auroc"])
+        # 형식1: epoch별 dict
         aurocs = [v["auroc"] for v in data.values()
                   if isinstance(v, dict) and "auroc" in v]
         return max(aurocs) if aurocs else None

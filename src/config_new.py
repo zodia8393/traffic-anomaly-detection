@@ -87,15 +87,18 @@ ANOMALY_CAMERA_CONFIGS = NEW_ROOT / "configs" / "cameras"
 ANOMALY_ALERT_THRESHOLD = 0.3
 ANOMALY_ALARM_THRESHOLD = 0.7
 
-# ── ML 앙상블 활성화 게이트 (Level 2~4) ───────────────────────────────
-# 기본 OFF. 미검증/저성능 모델이 사고판정을 오염시키지 않도록 전제조건 통과 모델만 투표.
-ENABLE_ML_ENSEMBLE = False           # 전체 ML 앙상블 마스터 스위치
+# ── ML 앙상블 활성화 게이트 (Level 2~4 + 지도감지기) ───────────────────
+# 미검증/저성능 모델이 사고판정을 오염시키지 않도록 전제조건 통과 모델만 투표.
+ENABLE_ML_ENSEMBLE = True            # 지도감지기(AUROC 0.918) 통과로 활성화
 ML_MIN_AUROC = 0.60                  # 활성화 최소 AUROC (미달 시 격리)
 # 각 레벨: (모델파일, eval파일(있으면 AUROC 검사), 기본활성)
 ML_MODEL_GATES = {
-    "level2_iforest": {"path": MODEL_DIR / "iforest_l2.pkl", "eval": None, "enabled": True},
-    "level3_lstm":    {"path": MODEL_DIR / "lstm_ae_l3.pt",  "eval": None, "enabled": True},
-    # STGAE: AUROC 0.495(랜덤) — 명시적 격리. 재학습으로 0.6+ 달성 전까지 weight=0.
+    # 지도 사고감지기: 궤적 운동학특징 RandomForest, AUROC 0.918 (STGAE 0.49 대체)
+    "supervised_traj": {"path": MODEL_DIR / "supervised_detector.pkl",
+                        "eval": MODEL_DIR / "supervised_detector.json", "enabled": True},
+    "level2_iforest": {"path": MODEL_DIR / "iforest_l2.pkl", "eval": None, "enabled": False},
+    "level3_lstm":    {"path": MODEL_DIR / "lstm_ae_l3.pt",  "eval": None, "enabled": False},
+    # STGAE: AUROC 0.495(랜덤) — 명시적 격리. 지도감지기로 대체됨.
     "level4_stgae":   {"path": MODEL_DIR / "stgae_aihub",
                        "eval": MODEL_DIR / "stgae_aihub" / "eval_summary.json", "enabled": False},
 }

@@ -74,6 +74,19 @@ class VisionPipeline:
         self.fps = fps
         self.anomaly_engine = anomaly_engine
 
+        # 지도 사고감지기 (STGAE 0.49 대체, AUROC 0.918) — 게이트 통과 시에만 활성
+        self._traj_detector = None
+        self._traj_score_interval = max(1, int(fps * 5))  # 5초마다 윈도우 채점
+        try:
+            from anomaly_engine.activation_gate import active_ml_models
+            if "supervised_traj" in active_ml_models():
+                from anomaly_engine.supervised_detector import SupervisedTrajectoryDetector
+                d = SupervisedTrajectoryDetector()
+                if d.is_loaded:
+                    self._traj_detector = d
+        except Exception:  # noqa: BLE001 — 감지기 없어도 기존 동작
+            pass
+
         # 프레임별 트랙 기록: {track_id: [{"bbox":..., "timestamp":..., "center":...}]}
         self._track_history: dict[int, list[dict[str, Any]]] = {}
         # 트랙별 속도 이력: {track_id: [speed_kmh, ...]}
@@ -213,12 +226,20 @@ class VisionPipeline:
         # 8. 이상징후 탐지 (AnomalyEngine, 선택적)
         anomaly_result = None
         if self.anomaly_engine is not None:
+            # 지도 사고감지기 점수 (윈도우 단위, 5초마다) → ml_scores
+            ml_scores = None
+            if (self._traj_detector is not None
+                    and frame_idx % self._traj_score_interval == 0):
+                sc = self._traj_detector.score(self._track_history)
+                if sc is not None:
+                    ml_scores = {"supervised_traj": sc}
             try:
                 anomaly_result = self.anomaly_engine.process_frame(
                     timestamp=timestamp,
                     tracked_vehicles=tracked_vehicles,
                     ttc_list=ttc_list,
                     dt=1.0 / self.fps if self.fps > 0 else 1.0,
+                    ml_scores=ml_scores,
                 )
                 if anomaly_result.alert is not None:
                     logger.info(
