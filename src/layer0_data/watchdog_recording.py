@@ -115,6 +115,65 @@ def check_cameras() -> list[str]:
     return stale
 
 
+def _count_active_cameras() -> tuple[int, int, float]:
+    """(전체 카메라 수, 활성 카메라 수, 오늘 누적 바이트)."""
+    import time
+    today = datetime.now().strftime("%Y%m%d")
+    day_dir = REC_ROOT / today
+    if not day_dir.exists():
+        return 0, 0, 0.0
+    now = time.time()
+    total = active = 0
+    day_bytes = 0
+    for cam_dir in day_dir.glob("*_hls"):
+        total += 1
+        files = list(cam_dir.glob("*.ts")) + list(cam_dir.glob("*.mp4"))
+        day_bytes += sum(f.stat().st_size for f in files)
+        ts = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)
+        if ts and (now - ts[-1].stat().st_mtime) <= CAMERA_STALE_SEC:
+            active += 1
+    return total, active, float(day_bytes)
+
+
+def write_metrics(running: bool, free_gb: float, disk_state: str,
+                  total_cams: int, active_cams: int, day_bytes: float) -> None:
+    """node_exporter textfile collector 형식(.prom)으로 메트릭 출력.
+
+    METRICS_DIR(기본 /DATA/cctv_recording/metrics)에 cctv_recording.prom 기록.
+    node_exporter --collector.textfile.directory=<dir>로 수집 가능.
+    """
+    metrics_dir = Path(os.environ.get("METRICS_DIR", str(REC_ROOT / "metrics")))
+    disk_code = {"ok": 0, "warn": 1, "crit": 2}.get(disk_state, -1)
+    lines = [
+        "# HELP cctv_recording_up 녹화 프로세스 가동(1)/중단(0)",
+        "# TYPE cctv_recording_up gauge",
+        f"cctv_recording_up {1 if running else 0}",
+        "# HELP cctv_recording_disk_free_gb /DATA 가용 용량(GB)",
+        "# TYPE cctv_recording_disk_free_gb gauge",
+        f"cctv_recording_disk_free_gb {free_gb:.1f}",
+        "# HELP cctv_recording_disk_state 0=ok 1=warn 2=crit",
+        "# TYPE cctv_recording_disk_state gauge",
+        f"cctv_recording_disk_state {disk_code}",
+        "# HELP cctv_recording_cameras_total 오늘 녹화 카메라 수",
+        "# TYPE cctv_recording_cameras_total gauge",
+        f"cctv_recording_cameras_total {total_cams}",
+        "# HELP cctv_recording_cameras_active 활성(갱신중) 카메라 수",
+        "# TYPE cctv_recording_cameras_active gauge",
+        f"cctv_recording_cameras_active {active_cams}",
+        "# HELP cctv_recording_day_bytes 오늘 누적 녹화 바이트",
+        "# TYPE cctv_recording_day_bytes gauge",
+        f"cctv_recording_day_bytes {day_bytes:.0f}",
+    ]
+    try:
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        # 원자적 쓰기 (수집 중 부분파일 방지)
+        tmp = metrics_dir / "cctv_recording.prom.tmp"
+        tmp.write_text("\n".join(lines) + "\n")
+        tmp.rename(metrics_dir / "cctv_recording.prom")
+    except Exception as e:
+        logger.warning("메트릭 기록 실패: %s", e)
+
+
 def send_alert(message: str) -> None:
     """경고 알림 — webhook 설정 시 POST, 항상 로그."""
     logger.error("🔔 ALERT: %s", message)
@@ -155,7 +214,9 @@ def main():
 
     free_gb, disk_state = check_disk()
     stale = check_cameras()
+    total_cams, active_cams, day_bytes = _count_active_cameras()
     write_status(running, pid, free_gb, disk_state, action, stale_cameras=stale)
+    write_metrics(running, free_gb, disk_state, total_cams, active_cams, day_bytes)
 
     # 알림 조건: 재시작 실패 / 디스크 위험 / 비활성 카메라
     if action == "restart_failed":
