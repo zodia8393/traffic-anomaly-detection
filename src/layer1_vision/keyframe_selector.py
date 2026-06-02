@@ -141,3 +141,42 @@ def select_keyframes(
     # 시간순 정렬
     selected_frames.sort()
     return selected_frames
+
+
+def select_keyframes_histogram(frames: list, max_frames: int = KEYFRAME_MAX) -> list:
+    """히스토그램 거리(Bhattacharyya) 기반 대표 프레임 선정.
+
+    제안서 13.4 "대표 프레임 선정(30→5, 히스토그램 거리)"의 realtime 구현.
+    연속 프레임 간 Bhattacharyya 거리가 큰(장면 변화) 프레임을 우선 선택하고,
+    첫·마지막 프레임을 필수 포함하여 시간 범위를 확보한다.
+
+    Args:
+        frames: 프레임 이미지(np.ndarray) 리스트.
+        max_frames: 최대 선정 수.
+
+    Returns:
+        선정된 프레임 이미지 리스트 (시간순).
+    """
+    import cv2
+
+    n = len(frames)
+    if n <= max_frames:
+        return frames
+
+    diffs = []
+    for i in range(1, n):
+        h1 = cv2.calcHist([frames[i - 1]], [0], None, [64], [0, 256])
+        h2 = cv2.calcHist([frames[i]], [0], None, [64], [0, 256])
+        cv2.normalize(h1, h1)
+        cv2.normalize(h2, h2)
+        diff = cv2.compareHist(h1, h2, cv2.HISTCMP_BHATTACHARYYA)
+        diffs.append((i, diff))
+
+    diffs.sort(key=lambda x: x[1], reverse=True)
+    selected_idx = {0, n - 1}  # 첫·마지막 필수
+    for idx, _ in diffs:
+        if len(selected_idx) >= max_frames:
+            break
+        selected_idx.add(idx)
+
+    return [frames[i] for i in sorted(selected_idx)]
