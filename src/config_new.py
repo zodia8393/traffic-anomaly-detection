@@ -96,6 +96,9 @@ ML_MODEL_GATES = {
     # 지도 사고감지기: 궤적 운동학특징 RandomForest, AUROC 0.918 (STGAE 0.49 대체)
     "supervised_traj": {"path": MODEL_DIR / "supervised_detector.pkl",
                         "eval": MODEL_DIR / "supervised_detector.json", "enabled": True},
+    # an1 특화: 차선변경 차량 깜빡이 검출, AUROC 0.89 (방향지시등 불이행 전용)
+    "an1_specialist": {"path": MODEL_DIR / "an1_specialist.pkl",
+                       "eval": MODEL_DIR / "an1_specialist.json", "enabled": True},
     "level2_iforest": {"path": MODEL_DIR / "iforest_l2.pkl", "eval": None, "enabled": False},
     "level3_lstm":    {"path": MODEL_DIR / "lstm_ae_l3.pt",  "eval": None, "enabled": False},
     # STGAE: AUROC 0.495(랜덤) — 명시적 격리. 지도감지기로 대체됨.

@@ -76,14 +76,22 @@ class VisionPipeline:
 
         # 지도 사고감지기 (STGAE 0.49 대체, AUROC 0.918) — 게이트 통과 시에만 활성
         self._traj_detector = None
+        self._an1_specialist = None
+        self._amber_history: dict[int, list[float]] = {}  # 차량별 깜빡이 강도(an1용)
         self._traj_score_interval = max(1, int(fps * 5))  # 5초마다 윈도우 채점
         try:
             from anomaly_engine.activation_gate import active_ml_models
-            if "supervised_traj" in active_ml_models():
+            active = active_ml_models()
+            if "supervised_traj" in active:
                 from anomaly_engine.supervised_detector import SupervisedTrajectoryDetector
                 d = SupervisedTrajectoryDetector()
                 if d.is_loaded:
                     self._traj_detector = d
+            if "an1_specialist" in active:
+                from anomaly_engine.an1_specialist import An1Specialist
+                a = An1Specialist()
+                if a.is_loaded:
+                    self._an1_specialist = a
         except Exception:  # noqa: BLE001 — 감지기 없어도 기존 동작
             pass
 
@@ -119,6 +127,9 @@ class VisionPipeline:
                 "anomaly": FrameResult | None,
             }
         """
+        # 프레임 크기 보관 (감지기 입력 좌표 정규화용 — 모델은 [0,1] 학습)
+        self._frame_h, self._frame_w = frame.shape[0], frame.shape[1]
+
         # 1. 검출
         raw_dets = self.detector.detect_frame(frame)
 
@@ -147,6 +158,13 @@ class VisionPipeline:
                 if crop.size > 0:
                     crops.append(crop)
                     crop_indices.append(len(tracked_vehicles))
+                    # 깜빡이(amber) 강도 추적 — an1 특화모델용 (크롭 재사용)
+                    if self._an1_specialist is not None:
+                        from anomaly_engine.turn_signal_detector import amber_intensity
+                        hist = self._amber_history.setdefault(tid, [])
+                        hist.append(amber_intensity(crop))
+                        if len(hist) > 75:
+                            self._amber_history[tid] = hist[-75:]
 
                 vehicle_info = {
                     "track_id": tid,
@@ -228,11 +246,21 @@ class VisionPipeline:
         if self.anomaly_engine is not None:
             # 지도 사고감지기 점수 (윈도우 단위, 5초마다) → ml_scores
             ml_scores = None
-            if (self._traj_detector is not None
+            if ((self._traj_detector is not None or self._an1_specialist is not None)
                     and frame_idx % self._traj_score_interval == 0):
-                sc = self._traj_detector.score(self._track_history)
-                if sc is not None:
-                    ml_scores = {"supervised_traj": sc}
+                norm = self._normalize_tracks()  # 픽셀→[0,1] (모델 학습 좌표계)
+                if self._traj_detector is not None:
+                    sc = self._traj_detector.score(norm)
+                    if sc is not None:
+                        ml_scores = {"supervised_traj": sc}
+                # an1 특화: 차선변경 감지 시 차선변경 차량 깜빡이 체크
+                if self._an1_specialist is not None and self._an1_specialist.has_lane_change(norm):
+                    changer = self._lane_changer_id(norm)
+                    amber = self._amber_history.get(changer, [])
+                    a1 = self._an1_specialist.score(norm, amber)
+                    if a1 is not None:
+                        ml_scores = (ml_scores or {})
+                        ml_scores["an1_specialist"] = a1
             try:
                 anomaly_result = self.anomaly_engine.process_frame(
                     timestamp=timestamp,
@@ -275,6 +303,44 @@ class VisionPipeline:
             "triggers": triggers,
             "anomaly": anomaly_result,
         }
+
+    def _normalize_tracks(self) -> dict[int, list]:
+        """_track_history(픽셀 center) → {tid: [(frame,x_norm,y_norm)]} (모델 학습 좌표계)."""
+        W = getattr(self, "_frame_w", 0) or 1
+        H = getattr(self, "_frame_h", 0) or 1
+        out: dict[int, list] = {}
+        for tid, pts in self._track_history.items():
+            seq = []
+            for i, p in enumerate(pts):
+                c = p.get("center")
+                if c is None:
+                    b = p.get("bbox")
+                    if not b:
+                        continue
+                    c = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                seq.append((i, c[0] / W, c[1] / H))
+            if seq:
+                out[tid] = seq
+        return out
+
+    def _lane_changer_id(self, norm_tracks: dict[int, list]) -> int | None:
+        """횡방향 이동 최대 트랙 id (차선변경 차량)."""
+        import numpy as np
+        all_d = [np.diff(np.array([(x, y) for _, x, y in sorted(p)]), axis=0)
+                 for p in norm_tracks.values() if len(p) >= 2]
+        if not all_d:
+            return None
+        D = np.concatenate(all_d)
+        lat_axis = 0 if D[:, 0].std() < D[:, 1].std() else 1
+        best_id, best = None, -1.0
+        for tid, p in norm_tracks.items():
+            if len(p) < 3:
+                continue
+            xy = np.array([(x, y) for _, x, y in sorted(p)])
+            lat = float(np.abs(np.diff(xy[:, lat_axis])).sum())
+            if lat > best:
+                best, best_id = lat, tid
+        return best_id
 
     def get_mllm_input_package(
         self,
