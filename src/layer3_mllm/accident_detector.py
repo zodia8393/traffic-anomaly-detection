@@ -94,6 +94,10 @@ class AccidentDetectorMLLM:
     def _validate(content: dict | str) -> dict:
         """MLLM 응답 검증 + 기본값 보완."""
         if isinstance(content, str):
+            # JSON 파싱 실패 — 트리거 발화 중 파싱실패는 무음 누락 금지, 검토 플래그.
+            logger.warning(
+                "사고감지 JSON 파싱 실패 → parse_error 플래그(검토필요). raw %d자", len(content)
+            )
             return {
                 "accident_detected": False,
                 "confidence": 0.0,
@@ -102,6 +106,7 @@ class AccidentDetectorMLLM:
                 "involved_vehicles": [],
                 "timestamp_estimated": "",
                 "reasoning": content,
+                "parse_error": True,
             }
 
         result = dict(content)

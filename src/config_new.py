@@ -71,6 +71,20 @@ MLLM_API_URL = "http://localhost:8080/v1"
 MLLM_MAX_TOKENS = 2048
 MLLM_TEMPERATURE = 0.1
 
+# CPU 추론 최적화 (i9-285K 24코어). 엔트리포인트 OMP_NUM_THREADS=4가 torch intra-op을
+# 4코어로 묶어 MLLM forward가 24코어 중 4개만 사용 → 명시 상향. 단발성 호출(시간당 ~12회)
+# 이라 16스레드 점유가 안전. 환경변수로 오버라이드.
+MLLM_TORCH_THREADS = int(os.environ.get("MLLM_TORCH_THREADS", "16"))
+# 비전토큰 상한 (지연 직결). 720x480 CCTV는 native 유지, 고해상 카메라만 다운스케일.
+# Qwen2.5-VL: 28x28 패치당 1토큰, 2x2 병합. max_pixels로 patch 수 캡.
+MLLM_MAX_PIXELS = int(os.environ.get("MLLM_MAX_PIXELS", str(768 * 768)))   # ≈ 589k px
+MLLM_MIN_PIXELS = int(os.environ.get("MLLM_MIN_PIXELS", str(256 * 256)))
+# 결정성: temp가 이 값 이하면 greedy(do_sample=False)로 — 0.1은 사실상 greedy 의도.
+MLLM_GREEDY_TEMP_THRESHOLD = 0.3
+# 태스크별 출력 토큰 상한 (512 하드캡 제거 — 93컬럼 보고서 잘림 방지)
+MLLM_MAX_NEW_TOKENS = {"accident": 512, "scene": 384, "classify": 384,
+                       "report": 2048, "outbreak": 1024, "default": 768}
+
 # ── 키프레임 ─────────────────────────────────────────────────────────
 KEYFRAME_MAX = 5
 KEYFRAME_MIN_INTERVAL_SEC = 1.0

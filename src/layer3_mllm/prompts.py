@@ -29,22 +29,34 @@ SCENE_UNDERSTANDING_PROMPT = """\
 ACCIDENT_DETECTION_PROMPT = """\
 당신은 교통사고 감지 전문가입니다.
 
-교통 상황 데이터:
+제공된 CCTV 키프레임은 **시간순으로 정렬**되어 있습니다(첫 장→마지막 장이 시간 경과).
+프레임 간 차량 위치 변화를 따라가며 충돌 순간을 찾으시오.
+
+아래 센서 데이터는 **참고용 힌트**이며 사고를 의미하지 않습니다.
+트리거는 "이상 의심" 신호일 뿐이므로, **반드시 영상(키프레임)에서 충돌·전복·정차·파손이
+실제로 보이는지 확인**한 뒤 판정하시오:
 - 트리거: {trigger_type}
 - 관련 차량 궤적:
   {track_summaries}
 - TTC: {ttc_values}
 - 속도 변화: {speed_changes}
 
-사고 발생 여부를 판단하고 JSON으로 응답하시오:
+판정 규칙 (엄수):
+1) 영상에서 충돌/접촉/전복/이상정차/파손이 **명백히 보일 때만** accident_detected=true.
+2) 힌트만 있고 영상에 사고 증거가 없으면 accident_detected=false, accident_type="none".
+3) 불확실하면 confidence를 낮게(<0.5) 주고, 추측으로 사고를 단정하지 마시오.
+4) involved_vehicles의 track_id는 위 궤적 데이터에 존재하는 ID만 사용(없는 ID 생성 금지).
+5) reasoning에는 **몇 번째 프레임에서 무엇을 보고** 판단했는지 시각적 근거를 명시.
+
+아래 JSON 형식으로만 응답(필드/enum 정확히 준수):
 {{
-  "accident_detected": true/false,
-  "confidence": 0.0~1.0,
-  "accident_type": "rear_end | sideswipe | rollover | head_on | fixed_object | none",
-  "severity": "minor | moderate | severe | fatal",
-  "involved_vehicles": [{{"track_id": N, "role": "striking|struck|..."}}],
+  "accident_detected": true 또는 false,
+  "confidence": 0.0~1.0 사이 숫자,
+  "accident_type": "rear_end | sideswipe | rollover | head_on | fixed_object | none 중 하나",
+  "severity": "minor | moderate | severe | fatal 중 하나",
+  "involved_vehicles": [{{"track_id": 정수, "role": "striking | struck"}}],
   "timestamp_estimated": "HH:MM:SS",
-  "reasoning": "판단 근거 설명"
+  "reasoning": "프레임 기반 시각적 판단 근거"
 }}"""
 
 # ── Task 3: 차종 분류 보정 ───────────────────────────────────────────
@@ -229,7 +241,9 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "accident": (
         "당신은 교통사고 감지 전문가입니다. "
-        "CCTV 키프레임과 차량 궤적 데이터를 분석하여 사고 발생 여부를 정밀 판단합니다. "
+        "CCTV 키프레임(시간순)에서 보이는 시각적 증거를 최우선으로 사고를 판단합니다. "
+        "센서/트리거 데이터는 참고용 힌트일 뿐이며, 영상에 사고가 보이지 않으면 사고가 아닙니다. "
+        "추측으로 사고를 단정하지 말고, 불확실하면 낮은 confidence로 표기하시오. "
         "반드시 JSON 형식으로만 응답하시오."
     ),
     "classify": (

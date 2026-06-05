@@ -31,3 +31,6 @@ external/
 
 # Logs
 *.log
+
+# MLLM 평가 하네스 산출물
+src/layer3_mllm/eval/results/

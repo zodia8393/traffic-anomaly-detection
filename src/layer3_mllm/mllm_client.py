@@ -5,6 +5,7 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import base64
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -14,9 +15,13 @@ import requests
 from config_new import (
     MLLM_API_URL,
     MLLM_BACKEND,
+    MLLM_GREEDY_TEMP_THRESHOLD,
+    MLLM_MAX_PIXELS,
     MLLM_MAX_TOKENS,
+    MLLM_MIN_PIXELS,
     MLLM_MODEL_PATH,
     MLLM_TEMPERATURE,
+    MLLM_TORCH_THREADS,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,8 +71,20 @@ class MLLMClient:
         import torch
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
-        logger.info("transformers 백엔드 로딩: %s", model_id)
-        self._hf_processor = AutoProcessor.from_pretrained(model_id)
+        # CPU intra-op 병렬도 명시 — 엔트리포인트 OMP_NUM_THREADS=4가 24코어 중 4개로
+        # 묶는 것을 해제(실측 torch.get_num_threads()==4 확인). 단발성 호출이라 16 안전.
+        try:
+            torch.set_num_threads(MLLM_TORCH_THREADS)
+            torch.set_num_interop_threads(1)
+        except Exception as e:  # set_num_interop_threads는 1회/조기 호출 제약 — 무시 가능
+            logger.debug("torch 스레드 설정 일부 실패(무시): %s", e)
+        logger.info("transformers 백엔드 로딩: %s (torch_threads=%d)",
+                    model_id, torch.get_num_threads())
+
+        # 비전토큰 상한 — 고해상 프레임의 patch 수 폭증으로 인한 지연/메모리 방지.
+        self._hf_processor = AutoProcessor.from_pretrained(
+            model_id, min_pixels=MLLM_MIN_PIXELS, max_pixels=MLLM_MAX_PIXELS,
+        )
         self._hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
@@ -151,8 +168,11 @@ class MLLMClient:
             except json.JSONDecodeError:
                 pass
 
-        logger.warning("JSON 파싱 실패, 에러 마커 반환 (raw %d chars)", len(text))
-        return {"error": "json_parse_failed", "raw_length": len(text), "anomaly": None, "vehicles": []}
+        # 실패 시 raw 텍스트(str)를 반환 — 각 태스크 validator의 str-fallback이 일관 처리.
+        # (기존: accident 편향 dict 반환 → str-fallback 우회 → 사고 무음 false-negative +
+        #  report/classify 스키마 오염. 이를 제거.)
+        logger.warning("JSON 파싱 실패, raw 텍스트 반환 (raw %d chars)", len(text))
+        return text
 
     # ── 핵심 API ─────────────────────────────────────────────────────
 
@@ -261,14 +281,20 @@ class MLLMClient:
             return_tensors="pt",
         ).to(self._hf_model.device)
 
+        # 토큰 캡: 512 하드캡 제거(93컬럼 보고서 잘림 방지). EOS로 단형 태스크는 조기 종료.
+        max_new = max_tokens or MLLM_MAX_TOKENS
+        # 결정성: temp 0.1은 greedy 의도 → 임계값 이하면 do_sample=False(완전 재현).
+        temp = temperature if temperature is not None else MLLM_TEMPERATURE
+        do_sample = temp > MLLM_GREEDY_TEMP_THRESHOLD
+        gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new, "use_cache": True}
+        if do_sample:
+            gen_kwargs.update(do_sample=True, temperature=temp, top_p=0.9)
+        else:
+            gen_kwargs["do_sample"] = False  # greedy — temperature/top_p 미전달(경고 방지)
+
         t0 = time.perf_counter()
         with torch.no_grad():
-            output_ids = self._hf_model.generate(
-                **inputs,
-                max_new_tokens=min(max_tokens or MLLM_MAX_TOKENS, 512),
-                temperature=temperature if temperature is not None else MLLM_TEMPERATURE,
-                do_sample=(temperature or MLLM_TEMPERATURE) > 0,
-            )
+            output_ids = self._hf_model.generate(**inputs, **gen_kwargs)
 
         # 입력 토큰 이후의 생성 부분만 디코딩
         generated = output_ids[0][inputs["input_ids"].shape[1]:]
