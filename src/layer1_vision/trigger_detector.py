@@ -11,6 +11,7 @@ MLLM에 분석을 요청할 트리거 이벤트를 생성한다.
   T5: 다수 동시 감속
   T6: 속도 분산 이상
   T7: 주기적 (5분 간격 자동)
+  T8: 보행자 감지 (도로 내 보행자 — 고속도로 보행자 = 최고위험)
 """
 
 from __future__ import annotations
@@ -81,6 +82,7 @@ class TriggerDetector:
         tracks_info: dict[int, dict[str, Any]],
         ttc_list: list[dict[str, Any]],
         speeds: dict[int, list[float]],
+        pedestrians: list[dict[str, Any]] | None = None,
     ) -> list[TriggerEvent]:
         """프레임 상태를 분석하여 트리거 이벤트 목록 반환.
 
@@ -90,6 +92,8 @@ class TriggerDetector:
             tracks_info: {track_id: {"bbox": [...], "center": (cx,cy), "cls": str}}
             ttc_list: compute_all_ttc() 반환값.
             speeds: {track_id: [speed_kmh, ...]} 최근 속도 이력.
+            pedestrians: 도로 내 보행자 검출 [{"track_id":int,"center":(x,y),"bbox":[...]}].
+                         None이면 보행자 트리거(T8) 비활성(하위호환).
 
         Returns:
             발생한 TriggerEvent 목록.
@@ -103,6 +107,8 @@ class TriggerDetector:
         events.extend(self._check_multi_decel(frame_idx, timestamp, speeds))
         events.extend(self._check_speed_variance(frame_idx, timestamp, speeds))
         events.extend(self._check_periodic(frame_idx, timestamp))
+        if pedestrians:
+            events.extend(self._check_pedestrian(frame_idx, timestamp, pedestrians))
 
         self._prev_timestamp = timestamp
         return events
@@ -409,3 +415,24 @@ class TriggerDetector:
                 description=f"주기적 스냅샷 ({TRIGGER_PERIODIC_INTERVAL}s 간격)",
             )]
         return []
+
+    # ── T8: 보행자 감지 (도로 내 보행자 = 고위험) ─────────────────────
+    def _check_pedestrian(
+        self, frame_idx: int, timestamp: float,
+        pedestrians: list[dict[str, Any]],
+    ) -> list[TriggerEvent]:
+        """도로 영역 내 보행자 검출 시 T8 발화 (고속도로 보행자 = 최고위험)."""
+        if not pedestrians or not self._is_cooled_down("T8", timestamp):
+            return []
+        ped_ids = [p.get("track_id", -1) for p in pedestrians]
+        # 보행자 수에 따른 심각도 (1명 0.8, 다수 1.0)
+        severity = min(1.0, 0.8 + 0.1 * (len(pedestrians) - 1))
+        self._fire("T8", timestamp)
+        return [TriggerEvent(
+            type="T8",
+            frame_idx=frame_idx,
+            timestamp=timestamp,
+            involved_tracks=[i for i in ped_ids if i >= 0],
+            severity=severity,
+            description=f"도로 내 보행자 {len(pedestrians)}명 감지",
+        )]
