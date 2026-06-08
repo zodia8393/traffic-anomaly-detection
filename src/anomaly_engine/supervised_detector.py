@@ -71,7 +71,11 @@ class SupervisedTrajectoryDetector:
         if feat is None:
             return None
         try:
-            return float(self._model.predict_proba(feat.reshape(1, -1))[0, 1])
+            import warnings
+            with warnings.catch_warnings():
+                # LightGBM: numpy 입력 시 'feature names' 경고 — 무해(순서 보존), 로그 스팸 억제
+                warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
+                return float(self._model.predict_proba(feat.reshape(1, -1))[0, 1])
         except Exception as e:  # noqa: BLE001
             logger.warning("지도감지기 추론 실패: %s", e)
             return None
