@@ -137,9 +137,10 @@ class AccidentDetectorMLLM:
         if not isinstance(result.get("involved_vehicles"), list):
             result["involved_vehicles"] = []
 
-        # 미감지 시 정합성 보정
+        # 미감지 시 정합성 보정 (사고 없음 → 사고유형·당사자 비움)
         if not result["accident_detected"]:
             result["accident_type"] = "none"
+            result["involved_vehicles"] = []
 
         if not result.get("reasoning"):
             result["reasoning"] = ""
