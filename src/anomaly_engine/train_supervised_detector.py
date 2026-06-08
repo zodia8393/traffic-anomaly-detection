@@ -1,7 +1,8 @@
 """지도 사고감지기 학습 — 궤적 운동학특징 → 비정상주행 분류.
 
-STGAE(비지도, AUROC 0.49) 대체. 모델 비교(RF/XGBoost/GBoost) 후 최고 모델 저장.
-평가: 독립 홀드아웃 AUROC + 비정상유형(an1~an7)별 recall + 임계값 튜닝.
+STGAE(비지도, AUROC 0.49) 대체. 모델 비교(RF/GBoost/XGBoost/LightGBM/CatBoost) 후
+5-fold CV 평균 AUROC로 최고 모델 선정 → 독립 홀드아웃으로 최종 평가·저장.
+평가: 홀드아웃 AUROC + 비정상유형(an1~an7)별 recall + 임계값 튜닝.
 
 실행:
   python train_supervised_detector.py
@@ -72,6 +73,8 @@ def main():
     Xtr, Xte, ytr, yte = X[tr], X[te], y[tr], y[te]
     types_te = [types[i] for i in te]
 
+    # 모델 후보 (불균형 처리 포함). 부스팅 라이브러리 없으면 자동 제외.
+    spw = float((y == 0).sum()) / max(1, (y == 1).sum())
     models = {
         "RandomForest": RandomForestClassifier(
             n_estimators=300, max_depth=12, class_weight="balanced",
@@ -81,25 +84,50 @@ def main():
     }
     try:
         from xgboost import XGBClassifier
-        spw = float((y == 0).sum()) / max(1, (y == 1).sum())
         models["XGBoost"] = XGBClassifier(
-            n_estimators=300, max_depth=5, learning_rate=0.08,
+            n_estimators=400, max_depth=5, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
             scale_pos_weight=spw, eval_metric="auc", random_state=42, n_jobs=-1)
     except ImportError:
         pass
+    try:
+        from lightgbm import LGBMClassifier
+        models["LightGBM"] = LGBMClassifier(
+            n_estimators=400, num_leaves=31, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, class_weight="balanced",
+            random_state=42, n_jobs=-1, verbose=-1)
+    except ImportError:
+        pass
+    try:
+        from catboost import CatBoostClassifier
+        models["CatBoost"] = CatBoostClassifier(
+            iterations=500, depth=6, learning_rate=0.05,
+            auto_class_weights="Balanced", random_seed=42, verbose=0,
+            thread_count=-1)
+    except ImportError:
+        pass
 
+    # 견고한 선정: 학습셋 5-fold 층화 CV 평균 AUROC (단일분할 노이즈 제거).
+    # 최종 성능은 독립 홀드아웃으로 보고(선정과 평가 분리).
+    from sklearn.model_selection import StratifiedKFold, cross_val_score
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     results = {}
-    best_name, best_auroc, best_model = None, -1, None
+    best_name, best_cv, best_model = None, -1, None
+    print("\n모델 비교 (학습셋 5-fold CV AUROC / 독립 홀드아웃 AUROC):")
     for name, m in models.items():
+        cv = cross_val_score(m, Xtr, ytr, cv=skf, scoring="roc_auc")
+        cv_mean, cv_std = float(cv.mean()), float(cv.std())
         m.fit(Xtr, ytr)
-        prob = m.predict_proba(Xte)[:, 1]
-        auroc = roc_auc_score(yte, prob)
-        results[name] = round(float(auroc), 4)
-        print(f"  {name:18s} AUROC {auroc:.4f}")
-        if auroc > best_auroc:
-            best_name, best_auroc, best_model = name, auroc, m
+        ho = float(roc_auc_score(yte, m.predict_proba(Xte)[:, 1]))
+        results[name] = {"cv_auroc": round(cv_mean, 4), "cv_std": round(cv_std, 4),
+                         "holdout_auroc": round(ho, 4)}
+        print(f"  {name:18s} CV {cv_mean:.4f}±{cv_std:.4f} | 홀드아웃 {ho:.4f}")
+        if cv_mean > best_cv:
+            best_name, best_cv, best_model = name, cv_mean, m
 
-    print(f"\n=== 최고: {best_name} AUROC {best_auroc:.4f} (STGAE 0.49 대비 +{best_auroc-0.49:.3f}) ===")
+    best_auroc = float(roc_auc_score(yte, best_model.predict_proba(Xte)[:, 1]))
+    print(f"\n=== 최고(CV기준): {best_name} | CV {best_cv:.4f} | 홀드아웃 {best_auroc:.4f} "
+          f"(STGAE 0.49 대비 +{best_auroc-0.49:.3f}) ===")
 
     # 임계값 튜닝: 정상 오탐 ≤10% 유지하며 recall 최대 (운영: 오탐 억제 중요)
     prob = best_model.predict_proba(Xte)[:, 1]
@@ -127,11 +155,13 @@ def main():
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     bundle = {"model": best_model, "threshold": float(best_thr),
               "feature_names": FEATURE_NAMES, "auroc": float(best_auroc),
-              "model_type": best_name}
+              "cv_auroc": round(best_cv, 4), "model_type": best_name}
     joblib.dump(bundle, args.out)
-    meta = {"model": best_name, "auroc": round(best_auroc, 4), "threshold": round(best_thr, 3),
-            "recall": round(overall_rec, 3), "fpr": round(overall_fpr, 3),
+    meta = {"model": best_name, "auroc": round(best_auroc, 4), "cv_auroc": round(best_cv, 4),
+            "threshold": round(best_thr, 3), "recall": round(overall_rec, 3),
+            "fpr": round(overall_fpr, 3),
             "per_type": {k: round(v, 3) for k, v in ptr.items()},
+            "version": "v3_cv_boosting", "selection": "5fold_cv_auroc",
             "all_models": results, "n_clips": len(X)}
     Path(args.out).with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
     print(f"\n저장: {args.out}")
