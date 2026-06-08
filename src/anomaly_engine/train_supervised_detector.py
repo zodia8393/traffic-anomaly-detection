@@ -64,9 +64,19 @@ def main():
     ap.add_argument("--out", default=str(MODEL_DIR / "supervised_detector.pkl"))
     args = ap.parse_args()
 
-    # test split만 양 클래스 보유 → 70/30 층화분할(독립 홀드아웃)
+    # test split = 비정상2467 + 정상494. train split = 정상1973(STGAE용, supervised 미사용분).
+    # 정상데이터 부족이 0.89 천장의 원인이었음(실측: 494→2467 시 AUROC 0.89→0.95, FPR 0.51→0.08).
+    # → train split의 정상을 정상클래스에 합쳐 균형·보강.
     X, y, types, names = load_split(args.data, "test")
-    print(f"클립 {len(X)} (비정상 {int(y.sum())} / 정상 {int((y==0).sum())}), 특징 {X.shape[1]}개")
+    Xtr_n, ytr_n, ttr_n, ntr_n = load_split(args.data, "train")
+    norm = ytr_n == 0
+    if norm.any():
+        X = np.vstack([X, Xtr_n[norm]])
+        y = np.r_[y, ytr_n[norm]]
+        types = types + [t for t, m in zip(ttr_n, norm) if m]
+        names = names + [n for n, m in zip(ntr_n, norm) if m]
+    print(f"클립 {len(X)} (비정상 {int(y.sum())} / 정상 {int((y==0).sum())}), 특징 {X.shape[1]}개 "
+          f"[train split 정상 {int(norm.sum())}개 보강]")
 
     idx = np.arange(len(X))
     tr, te = train_test_split(idx, test_size=0.3, stratify=y, random_state=42)
