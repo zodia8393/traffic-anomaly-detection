@@ -116,7 +116,6 @@ def _migrate_accidents(conn: duckdb.DuckDBPyConnection) -> None:
         if col not in existing:
             conn.execute(f"ALTER TABLE accidents ADD COLUMN {col} {dtype}")
 
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS report_archive (
             report_id           VARCHAR PRIMARY KEY,
@@ -148,6 +147,32 @@ def _migrate_accidents(conn: duckdb.DuckDBPyConnection) -> None:
             truck_ratio     FLOAT,
             risk_score      FLOAT,
             mllm_scene      VARCHAR,
+            volume_dir_a    INTEGER,
+            volume_dir_b    INTEGER,
+            dir_a_label     VARCHAR,
+            dir_b_label     VARCHAR,
+            by_class_json   JSON,
             PRIMARY KEY (ic_name, period_start)
         )
     """)
+    # 방향별 교통량 계수기(CameraCounter) 컬럼 — 기존 DB에 없으면 ADD.
+    # PK는 (ic_name, period_start) 불변 — direction을 PK에 넣지 말 것
+    # (feature_engineer가 ic_name LIMIT 1로 읽어 한 방향만 집계되는 회귀 방지).
+    _migrate_traffic_agg(conn)
+
+
+def _migrate_traffic_agg(conn: duckdb.DuckDBPyConnection) -> None:
+    """기존 traffic_agg 테이블에 방향별 계수 컬럼이 없으면 추가 (PK 불변)."""
+    existing = {row[0] for row in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='traffic_agg'"
+    ).fetchall()}
+    migrations = [
+        ("volume_dir_a", "INTEGER"),
+        ("volume_dir_b", "INTEGER"),
+        ("dir_a_label", "VARCHAR"),
+        ("dir_b_label", "VARCHAR"),
+        ("by_class_json", "JSON"),
+    ]
+    for col, dtype in migrations:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE traffic_agg ADD COLUMN {col} {dtype}")

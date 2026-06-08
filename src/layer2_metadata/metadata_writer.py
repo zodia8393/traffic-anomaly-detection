@@ -203,13 +203,21 @@ class MetadataWriter:
         agg_data : dict
             ic_name, period_start, volume, avg_speed, speed_std,
             truck_ratio, risk_score, mllm_scene 키.
+            (선택) volume_dir_a, volume_dir_b, dir_a_label, dir_b_label,
+            by_class(dict→json) — 방향별 교통량 계수기(CameraCounter) 적재용.
+            미지정 시 None → 레거시 단일 volume 적재와 하위호환.
         """
+        # by_class dict → JSON 직렬화 (write_accident json_cols 패턴)
+        by_class = agg_data.get("by_class")
+        by_class_json = (json.dumps(by_class, ensure_ascii=False)
+                         if isinstance(by_class, (dict, list)) else agg_data.get("by_class_json"))
         sql = """
             INSERT OR REPLACE INTO traffic_agg (
                 ic_name, period_start,
                 volume, avg_speed, speed_std,
-                truck_ratio, risk_score, mllm_scene
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                truck_ratio, risk_score, mllm_scene,
+                volume_dir_a, volume_dir_b, dir_a_label, dir_b_label, by_class_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         self._execute_durable(sql, [
             agg_data["ic_name"],
@@ -220,6 +228,11 @@ class MetadataWriter:
             agg_data.get("truck_ratio"),
             agg_data.get("risk_score"),
             agg_data.get("mllm_scene"),
+            agg_data.get("volume_dir_a"),
+            agg_data.get("volume_dir_b"),
+            agg_data.get("dir_a_label"),
+            agg_data.get("dir_b_label"),
+            by_class_json,
         ], "traffic_agg", agg_data)
 
     # ------------------------------------------------------------------

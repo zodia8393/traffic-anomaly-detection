@@ -52,6 +52,7 @@ class VisionPipeline:
         keyframe_sel: Any = None,
         fps: float = 1.0,
         anomaly_engine: AnomalyEngine | None = None,
+        traffic_counter: Any = None,
     ) -> None:
         """컴포넌트 주입.
 
@@ -65,6 +66,8 @@ class VisionPipeline:
             keyframe_sel: 미사용 (모듈 함수 직접 호출). 호환성 유지.
             fps: 영상 FPS.
             anomaly_engine: AnomalyEngine 인스턴스 (선택적). None이면 이상징후 탐지 비활성.
+            traffic_counter: CameraCounter 인스턴스 (선택적). None이면 교통량 계수 비활성
+                (기본값). 검출/추적 패스를 공유하므로 추가 추론 없이 계수만 덧붙는다.
         """
         self.detector = detector
         self.tracker = tracker
@@ -73,6 +76,7 @@ class VisionPipeline:
         self.trigger_det = trigger_det or TriggerDetector()
         self.fps = fps
         self.anomaly_engine = anomaly_engine
+        self.traffic_counter = traffic_counter
 
         # 지도 사고감지기 (STGAE 0.49 대체, AUROC 0.918) — 게이트 통과 시에만 활성
         self._traj_detector = None
@@ -294,6 +298,16 @@ class VisionPipeline:
         if len(self._frame_buffer) > self._frame_buffer_max:
             self._frame_buffer = self._frame_buffer[-self._frame_buffer_max:]
 
+        # 10. 교통량 계수 (선택적, 격리). 검출/추적 패스 공유 — tracked_vehicles 읽기전용
+        #     소비. 실패해도 사고감지(triggers/anomaly)에 무영향(try/except 격리).
+        traffic_count = None
+        if self.traffic_counter is not None:
+            try:
+                self.traffic_counter.update(tracked_vehicles)
+                traffic_count = self.traffic_counter.snapshot()
+            except Exception:  # noqa: BLE001 — 계수 실패가 사고감지를 막지 않도록 격리
+                logger.exception("교통량 계수 실패 (frame=%d)", frame_idx)
+
         return {
             "frame_idx": frame_idx,
             "timestamp": timestamp,
@@ -302,6 +316,7 @@ class VisionPipeline:
             "classifications": classifications,
             "triggers": triggers,
             "anomaly": anomaly_result,
+            "traffic_count": traffic_count,
         }
 
     def _normalize_tracks(self) -> dict[int, list]:
