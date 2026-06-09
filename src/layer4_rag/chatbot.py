@@ -50,7 +50,8 @@ class RagChatbot:
             return "longest"
         if any(k in t for k in ("몇건", "몇개", "건수", "개수", "총몇", "얼마나많", "총건")):
             return "count"
-        if any(k in t for k in ("가장심각", "사망", "최다사상", "인명피해가큰", "대형사고", "가장큰사고")):
+        if (("인명피해" in t or "사상자" in t) and any(k in t for k in ("큰", "많", "최대", "가장"))) \
+                or any(k in t for k in ("가장심각", "사망자가많", "최다사상", "대형사고", "가장큰사고")):
             return "severe"
         return "semantic"
 
@@ -96,62 +97,78 @@ class RagChatbot:
                 return out
         return self._semantic_answer(question, top_k)
 
+    # ── 복합 필터 빌더 (노선+유형+차량+원인) ─────────────────────────
+    def _build_where(self, q: str):
+        conds, params, scope = [], [], []
+        line = self._line_filter(q)
+        if line:
+            conds.append("line_name = ?"); params.append(line); scope.append(line)
+        t = q.replace(" ", "")
+        for atype in ("전면차단", "부분차단", "갓길"):
+            if atype in t:
+                conds.append("document_type LIKE ?"); params.append(f"%{atype}%"); scope.append(atype); break
+        for veh in ("화물차", "트레일러", "버스", "승용차", "이륜", "오토바이"):
+            if veh in t:
+                conds.append("vehicles LIKE ?"); params.append(f"%{veh}%"); scope.append(veh); break
+        for cause in ("졸음", "과속", "주시태만", "안전거리", "역주행", "빗길", "결빙", "화재"):
+            if cause in t:
+                col = "chunk_text" if cause in ("화재",) else "cause"
+                conds.append(f"{col} LIKE ?"); params.append(f"%{cause}%"); scope.append(cause); break
+        where = " AND ".join(conds) if conds else "1=1"
+        return where, params, " ".join(scope)
+
     # ── 구조화 질의 (SQL) ────────────────────────────────────────────
     def _structured_answer(self, intent: str, q: str, top_k: int) -> dict | None:
-        line = self._line_filter(q)
-        where = "WHERE acc_dt IS NOT NULL"
-        params: list = []
-        scope = ""
-        if line:
-            where += " AND line_name = ?"
-            params.append(line)
-            scope = f"{line} "
+        flt, params, scope = self._build_where(q)
+        sc = (scope + " ") if scope else ""
         try:
             if intent == "count":
-                where_c = "WHERE 1=1" + (" AND line_name = ?" if line else "")
-                n = self._db.execute(f"SELECT COUNT(*) FROM chunks {where_c}", params).fetchone()[0]
+                n = self._db.execute(f"SELECT COUNT(*) FROM chunks WHERE {flt}", params).fetchone()[0]
                 by = self._db.execute(
-                    f"SELECT document_type, COUNT(*) c FROM chunks {where_c} "
+                    f"SELECT document_type, COUNT(*) c FROM chunks WHERE {flt} "
                     f"GROUP BY document_type ORDER BY c DESC", params).fetchall()
                 bd = ", ".join(f"{t} {c}건" for t, c in by if t)
-                ans = f"{scope}사고는 총 {n}건 기록돼 있습니다." + (f" (유형별: {bd})" if bd else "")
-                cases = self._recent_cases(line, 3)
+                if n == 0:
+                    return {"answer": f"'{scope}' 조건의 사고 기록은 없습니다.", "stats": {"n": 0}, "cases": []}
+                ans = f"{sc}사고는 총 {n}건 기록돼 있습니다." + (f" (유형별: {bd})" if bd else "")
+                cases = self._sql_cases(f"{flt} AND acc_dt IS NOT NULL", params, "acc_dt DESC", 3)
                 return {"answer": ans, "stats": {"n": n}, "cases": cases}
 
             order = {"recent": "acc_dt DESC", "longest": "closure_min DESC",
                      "severe": "casualties DESC, closure_min DESC"}[intent]
-            extra = "" if intent == "recent" else (" AND closure_min IS NOT NULL" if intent == "longest"
-                                                   else " AND casualties IS NOT NULL")
+            cond = flt + " AND acc_dt IS NOT NULL"
+            if intent == "longest":
+                cond += " AND closure_min IS NOT NULL"
+            elif intent == "severe":
+                cond += " AND casualties > 0"
             rows = self._db.execute(
                 f"SELECT acc_dt, line_name, direction, document_type, vehicles, cause, "
-                f"closure_min, casualties, chunk_text FROM chunks {where}{extra} "
+                f"closure_min, casualties, chunk_text FROM chunks WHERE {cond} "
                 f"ORDER BY {order} LIMIT {top_k}", params).fetchall()
             if not rows:
                 return None
-            top = rows[0]
-            dt, ln, dr, ty, veh, cau, clo, cas, txt = top
-            head = {"recent": f"가장 최근 {scope}사고는 {dt}에 발생했습니다.",
-                    "longest": f"차단시간이 가장 길었던 {scope}사고입니다.",
-                    "severe": f"인명피해가 가장 컸던 {scope}사고입니다."}[intent]
+            dt, ln, dr, ty, veh, cau, clo, cas, _ = rows[0]
+            head = {"recent": f"가장 최근 {sc}사고는 {dt}에 일어났습니다.",
+                    "longest": f"{sc}사고 중 차단시간이 가장 길었던 건은 {clo}분입니다.",
+                    "severe": f"{sc}사고 중 인명피해가 가장 컸던 건은 {cas}명입니다."}[intent]
             detail = f"{ln} {dr}방향 {ty}, 피해차량 {veh or '미상'}"
             if cau:
-                detail += f", 원인 {cau}"
-            if clo is not None:
+                detail += f", 원인은 {cau}"
+            if clo is not None and intent != "longest":
                 detail += f", 차단/처리 {clo}분"
-            if cas:
+            if cas and intent != "severe":
                 detail += f", 인명피해 {cas}명"
-            ans = f"{head}\n{detail}."
+            ans = f"{head} ({detail})"
             cases = [{"text": r[8], "score": 1.0 - i * 0.05} for i, r in enumerate(rows)]
-            stat = ({"max": int(top[6]), "n": len(rows)} if intent == "longest"
-                    else {"인명피해": int(top[7]), "n": len(rows)} if intent == "severe" else None)
+            stat = ({"최대분": int(rows[0][6]), "n": len(rows)} if intent == "longest"
+                    else {"인명피해": int(rows[0][7]), "n": len(rows)} if intent == "severe" else None)
             return {"answer": ans, "stats": stat, "cases": cases}
         except Exception:  # noqa: BLE001 — 구조화 실패 시 의미검색으로 폴백
             return None
 
-    def _recent_cases(self, line, k):
-        w = "WHERE acc_dt IS NOT NULL" + (" AND line_name = ?" if line else "")
-        p = [line] if line else []
-        rows = self._db.execute(f"SELECT chunk_text FROM chunks {w} ORDER BY acc_dt DESC LIMIT {k}", p).fetchall()
+    def _sql_cases(self, cond, params, order, k):
+        rows = self._db.execute(
+            f"SELECT chunk_text FROM chunks WHERE {cond} ORDER BY {order} LIMIT {k}", params).fetchall()
         return [{"text": r[0], "score": 1.0} for r in rows]
 
     # ── 의미 질의 (벡터 RAG) ─────────────────────────────────────────
@@ -174,16 +191,14 @@ class RagChatbot:
         return {"answer": answer, "stats": stats, "cases": cases}
 
     def _grounded_answer(self, hits: list[dict], closures: list[int]) -> str:
-        lines = [f"유사 사고 {len(hits)}건을 찾았습니다."]
+        # 사례는 아래 카드로 표시되므로 답변은 자연스러운 요약만 (중복 제거)
         if closures:
             arr = np.array(closures)
-            lines.append(
-                f"실제 차단/처리시간: 평균 {arr.mean():.0f}분, 중앙값 {int(np.median(arr))}분 "
-                f"(범위 {arr.min()}~{arr.max()}분, n={len(closures)}).")
-        lines.append("\n가장 유사한 사례:")
-        for i, h in enumerate(hits[:3], 1):
-            lines.append(f"  {i}. {h['excerpt'][:140]}")
-        return "\n".join(lines)
+            spread = f"{arr.min()}~{arr.max()}분" if arr.min() != arr.max() else f"{arr.min()}분"
+            return (f"비슷한 사고 {len(hits)}건을 찾았어요. 이런 유형은 보통 차단·처리에 "
+                    f"평균 {arr.mean():.0f}분(중앙값 {int(np.median(arr))}분, {spread}) 걸렸습니다. "
+                    f"아래는 가장 유사한 사례들입니다.")
+        return f"비슷한 사고 {len(hits)}건을 찾았어요. 아래 사례를 참고하세요."
 
     def _llm_answer(self, question: str, hits: list[dict], closures: list[int]) -> str:
         if self._client is None:
