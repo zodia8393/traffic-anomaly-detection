@@ -30,6 +30,44 @@ class RagChatbot:
         self.r = get_retriever()
         self.use_llm = use_llm
         self._client = None
+        # 구조화 질의(최근/최대/건수)용 read-only 연결
+        self._db = None
+        try:
+            import duckdb
+            from config_new import RAG_DB_PATH
+            if Path(RAG_DB_PATH).exists():
+                self._db = duckdb.connect(RAG_DB_PATH, read_only=True)
+        except Exception:  # noqa: BLE001
+            self._db = None
+
+    # ── 의도 분류 (구조화 vs 의미) ───────────────────────────────────
+    @staticmethod
+    def _intent(q: str) -> str:
+        t = q.replace(" ", "")
+        if any(k in t for k in ("최근", "최신", "마지막", "언제", "요즘")):
+            return "recent"
+        if any(k in t for k in ("가장긴", "제일긴", "가장오래", "제일오래", "최대차단", "가장길", "오래걸린", "longest")):
+            return "longest"
+        if any(k in t for k in ("몇건", "몇개", "건수", "개수", "총몇", "얼마나많", "총건")):
+            return "count"
+        if any(k in t for k in ("가장심각", "사망", "최다사상", "인명피해가큰", "대형사고", "가장큰사고")):
+            return "severe"
+        return "semantic"
+
+    def _line_filter(self, q: str):
+        """질문에서 노선명 추출(있으면 SQL 필터)."""
+        if self._db is None:
+            return None
+        try:
+            lines = [r[0] for r in self._db.execute(
+                "SELECT DISTINCT line_name FROM chunks WHERE line_name IS NOT NULL").fetchall()]
+        except Exception:  # noqa: BLE001
+            return None
+        qn = q.replace(" ", "")
+        for ln in sorted(lines, key=len, reverse=True):
+            if ln and ln.replace(" ", "") in qn:
+                return ln
+        return None
 
     @property
     def available(self) -> bool:
@@ -50,7 +88,74 @@ class RagChatbot:
         return self._grounded_answer(hits, closures)
 
     def ask_structured(self, question: str, top_k: int = 5) -> dict:
-        """웹/API용 구조화 응답: {answer, stats, cases}."""
+        """웹/API용 구조화 응답: {answer, stats, cases}. 의도별 라우팅."""
+        intent = self._intent(question)
+        if intent != "semantic" and self._db is not None:
+            out = self._structured_answer(intent, question, top_k)
+            if out is not None:
+                return out
+        return self._semantic_answer(question, top_k)
+
+    # ── 구조화 질의 (SQL) ────────────────────────────────────────────
+    def _structured_answer(self, intent: str, q: str, top_k: int) -> dict | None:
+        line = self._line_filter(q)
+        where = "WHERE acc_dt IS NOT NULL"
+        params: list = []
+        scope = ""
+        if line:
+            where += " AND line_name = ?"
+            params.append(line)
+            scope = f"{line} "
+        try:
+            if intent == "count":
+                where_c = "WHERE 1=1" + (" AND line_name = ?" if line else "")
+                n = self._db.execute(f"SELECT COUNT(*) FROM chunks {where_c}", params).fetchone()[0]
+                by = self._db.execute(
+                    f"SELECT document_type, COUNT(*) c FROM chunks {where_c} "
+                    f"GROUP BY document_type ORDER BY c DESC", params).fetchall()
+                bd = ", ".join(f"{t} {c}건" for t, c in by if t)
+                ans = f"{scope}사고는 총 {n}건 기록돼 있습니다." + (f" (유형별: {bd})" if bd else "")
+                cases = self._recent_cases(line, 3)
+                return {"answer": ans, "stats": {"n": n}, "cases": cases}
+
+            order = {"recent": "acc_dt DESC", "longest": "closure_min DESC",
+                     "severe": "casualties DESC, closure_min DESC"}[intent]
+            extra = "" if intent == "recent" else (" AND closure_min IS NOT NULL" if intent == "longest"
+                                                   else " AND casualties IS NOT NULL")
+            rows = self._db.execute(
+                f"SELECT acc_dt, line_name, direction, document_type, vehicles, cause, "
+                f"closure_min, casualties, chunk_text FROM chunks {where}{extra} "
+                f"ORDER BY {order} LIMIT {top_k}", params).fetchall()
+            if not rows:
+                return None
+            top = rows[0]
+            dt, ln, dr, ty, veh, cau, clo, cas, txt = top
+            head = {"recent": f"가장 최근 {scope}사고는 {dt}에 발생했습니다.",
+                    "longest": f"차단시간이 가장 길었던 {scope}사고입니다.",
+                    "severe": f"인명피해가 가장 컸던 {scope}사고입니다."}[intent]
+            detail = f"{ln} {dr}방향 {ty}, 피해차량 {veh or '미상'}"
+            if cau:
+                detail += f", 원인 {cau}"
+            if clo is not None:
+                detail += f", 차단/처리 {clo}분"
+            if cas:
+                detail += f", 인명피해 {cas}명"
+            ans = f"{head}\n{detail}."
+            cases = [{"text": r[8], "score": 1.0 - i * 0.05} for i, r in enumerate(rows)]
+            stat = ({"max": int(top[6]), "n": len(rows)} if intent == "longest"
+                    else {"인명피해": int(top[7]), "n": len(rows)} if intent == "severe" else None)
+            return {"answer": ans, "stats": stat, "cases": cases}
+        except Exception:  # noqa: BLE001 — 구조화 실패 시 의미검색으로 폴백
+            return None
+
+    def _recent_cases(self, line, k):
+        w = "WHERE acc_dt IS NOT NULL" + (" AND line_name = ?" if line else "")
+        p = [line] if line else []
+        rows = self._db.execute(f"SELECT chunk_text FROM chunks {w} ORDER BY acc_dt DESC LIMIT {k}", p).fetchall()
+        return [{"text": r[0], "score": 1.0} for r in rows]
+
+    # ── 의미 질의 (벡터 RAG) ─────────────────────────────────────────
+    def _semantic_answer(self, question: str, top_k: int) -> dict:
         hits = self.r.search(question, top_k=top_k)
         closures = []
         for h in hits:

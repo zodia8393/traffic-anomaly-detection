@@ -102,7 +102,20 @@ def render_text(row: dict) -> tuple[str, str, list[str], int | None]:
         parts.append(f"실제 차단/처리시간 약 {closure}분.")
 
     keywords = [k for k in (line, atype, cause, *(vehicles[:2])) if k]
-    return " ".join(parts), atype, keywords, closure
+    # 정렬 가능한 사고일시 (YYYY-MM-DD HH:MM) — 최근성 질의용
+    acc_dt = None
+    if date:
+        try:
+            y, mo, da = (date.replace(" ", "").split("."))[:3]
+            acc_dt = f"{int(y):04d}-{int(mo):02d}-{int(da):02d} {tm or '00:00'}"
+        except Exception:  # noqa: BLE001
+            acc_dt = None
+    casualties = int(float(total)) if total else 0
+    return {
+        "text": " ".join(parts), "doctype": atype, "keywords": keywords, "closure": closure,
+        "line": line, "direction": direction or "", "acc_dt": acc_dt, "cause": cause or "",
+        "vehicles": ", ".join(map(str, vehicles)) if vehicles else "", "casualties": casualties,
+    }
 
 
 def init_rag_schema(conn: duckdb.DuckDBPyConnection) -> None:
@@ -112,7 +125,8 @@ def init_rag_schema(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS chunks(
         chunk_id VARCHAR PRIMARY KEY, document_id VARCHAR, chunk_text VARCHAR,
         keywords_json VARCHAR, domain VARCHAR, document_type VARCHAR,
-        closure_min INTEGER)""")
+        closure_min INTEGER, acc_dt VARCHAR, line_name VARCHAR, direction VARCHAR,
+        cause VARCHAR, vehicles VARCHAR, casualties INTEGER)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS chunk_embeddings(
         embedding_id VARCHAR PRIMARY KEY, chunk_id VARCHAR, embedding_model VARCHAR,
         vector_dim INTEGER, embedding_json VARCHAR, is_current BOOLEAN)""")
@@ -136,11 +150,10 @@ def main() -> None:
     chunks = []
     for r in rows:
         row = dict(zip(cols, r))
-        text, dtype, kw, closure = render_text(row)
-        if len(text) < 20:
+        d = render_text(row)
+        if len(d["text"]) < 20:
             continue
-        chunks.append({"chunk_id": str(uuid.uuid4()), "text": text, "doctype": dtype,
-                       "kw": kw, "closure": closure, "domain": _g(row, "노선명") or "고속도로"})
+        chunks.append({"chunk_id": str(uuid.uuid4()), "domain": _g(row, "노선명") or "고속도로", **d})
     print(f"[render] 유효 청크 {len(chunks)} (예시: {chunks[0]['text'][:90]}...)", flush=True)
 
     # 임베딩 (배치)
@@ -162,9 +175,10 @@ def main() -> None:
     out.execute("INSERT INTO documents VALUES (?,?,?,?,?)",
                 [doc_id, Path(args.src).name, "highway", "사고차단기록", "exkor_lockdown"])
     out.executemany(
-        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
-        [(c["chunk_id"], doc_id, c["text"], json.dumps(c["kw"], ensure_ascii=False),
-          c["domain"], c["doctype"], c["closure"]) for c in chunks])
+        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(c["chunk_id"], doc_id, c["text"], json.dumps(c["keywords"], ensure_ascii=False),
+          c["domain"], c["doctype"], c["closure"], c["acc_dt"], c["line"], c["direction"],
+          c["cause"], c["vehicles"], c["casualties"]) for c in chunks])
     out.executemany(
         "INSERT INTO chunk_embeddings VALUES (?,?,?,?,?,?)",
         [(str(uuid.uuid4()), c["chunk_id"], SBERT_MODEL, dim,
