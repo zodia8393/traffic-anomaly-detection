@@ -182,20 +182,23 @@ class MLLMClient:
         images: list | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        parse_json: bool = True,
     ) -> dict:
-        """멀티모달 채팅 — 이미지+텍스트 -> JSON 응답.
+        """멀티모달 채팅 — 이미지+텍스트 -> 응답.
 
         Args:
             messages: OpenAI 형식 메시지 리스트.
             images: numpy 배열 또는 base64 문자열 리스트.
             max_tokens: 최대 생성 토큰 수.
             temperature: 샘플링 온도.
+            parse_json: True(기본)면 응답을 JSON으로 파싱(사고감지 등). False면 평문 그대로
+                반환(챗봇 등 대화형) — 불필요한 JSON 파싱·경고 로그 방지.
 
         Returns:
             {"content": str|dict, "usage": dict, "latency_sec": float}
         """
         if self.backend == "transformers":
-            return self._chat_transformers(messages, images, max_tokens, temperature)
+            return self._chat_transformers(messages, images, max_tokens, temperature, parse_json)
 
         prepared = self._prepare_messages(messages, images)
 
@@ -224,7 +227,7 @@ class MLLMClient:
         raw_text = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
 
-        parsed = self._parse_json_response(raw_text)
+        parsed = self._parse_json_response(raw_text) if parse_json else raw_text
 
         logger.info(
             "MLLM 응답 수신: %.1f초, tokens=%s",
@@ -244,6 +247,7 @@ class MLLMClient:
         images: list | None,
         max_tokens: int | None,
         temperature: float | None,
+        parse_json: bool = True,
     ) -> dict:
         """transformers 백엔드로 직접 추론."""
         import torch
@@ -309,7 +313,7 @@ class MLLMClient:
             "total_tokens": input_tokens + output_tokens,
         }
 
-        parsed = self._parse_json_response(raw_text)
+        parsed = self._parse_json_response(raw_text) if parse_json else raw_text
 
         logger.info(
             "MLLM 응답 수신 (transformers): %.1f초, tokens=%d→%d",

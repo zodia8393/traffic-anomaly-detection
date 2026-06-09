@@ -209,9 +209,10 @@ class RagChatbot:
         prompt = (f"당신은 고속도로 사고 처리 전문가입니다. 아래 유사 실사고 기록만 근거로 "
                   f"질문에 간결히(3문장 이내) 한국어로 답하시오. 기록에 없는 내용은 추측 금지.\n\n"
                   f"질문: {question}\n\n유사 실사고:\n{ctx}\n{stat}\n\n답변:")
-        res = self._client.chat([{"role": "user", "content": prompt}], max_tokens=256)
+        res = self._client.chat([{"role": "user", "content": prompt}], max_tokens=256,
+                                parse_json=False)  # 챗봇은 평문 답변 (JSON 파싱·경고 불필요)
         c = res.get("content")
-        return c if isinstance(c, str) else str(c)
+        return (c if isinstance(c, str) else str(c)).strip()
 
 
 def _print_answer(q: str, a: str) -> None:
