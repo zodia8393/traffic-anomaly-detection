@@ -28,6 +28,33 @@ class ReportGenerator:
         self.client = mllm_client
         self.report_indexer = report_indexer
 
+    def _fetch_similar_cases(self, accident_type: str, road_name: str,
+                             top_k: int = 3) -> list[dict]:
+        """유사 사례: 외부 RAG 지식베이스(DB 파일 플러그인) 우선, 우리 인덱서 폴백.
+
+        RAG_DB_PATH에 협업자 DB가 있으면 그쪽 지식(차단시간 통계 등)을, 없으면 우리
+        과거 보고서(report_indexer)를 사용. 둘 다 실패하면 빈 리스트(안전 무동작).
+        """
+        # 1) 외부 RAG 지식베이스 (있을 때만)
+        try:
+            from layer4_rag.rag_retriever import get_retriever
+            rag = get_retriever()
+            if rag.available:
+                hits = rag.search_similar(accident_type=accident_type,
+                                          road_name=road_name, top_k=top_k)
+                if hits:
+                    return hits
+        except Exception as e:  # noqa: BLE001 — RAG 실패가 보고서 생성을 막지 않음
+            logger.warning("RAG 지식베이스 검색 실패: %s", e)
+        # 2) 우리 과거 보고서 인덱서 (폴백)
+        if self.report_indexer is not None:
+            try:
+                return self.report_indexer.search_similar(
+                    accident_type=accident_type, road_name=road_name, top_k=top_k)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("유사 사례 검색 실패: %s", e)
+        return []
+
     def generate(
         self,
         keyframes: list[np.ndarray],
@@ -62,17 +89,12 @@ class ReportGenerator:
         Returns:
             93컬럼 서식의 JSON dict + raw_response.
         """
-        # 유사 사례 검색 (report_indexer 사용)
-        if similar_cases is None and self.report_indexer is not None:
-            try:
-                similar_cases = self.report_indexer.search_similar(
-                    accident_type=accident_info.get("accident_type", ""),
-                    road_name=ic_info.get("road_name", ""),
-                    top_k=3,
-                )
-            except Exception as e:
-                logger.warning("유사 사례 검색 실패: %s", e)
-                similar_cases = []
+        # 유사 사례 검색: 외부 RAG 지식베이스(DB 파일 있으면) 우선 → 우리 보고서 인덱서 폴백
+        if similar_cases is None:
+            similar_cases = self._fetch_similar_cases(
+                accident_info.get("accident_type", ""),
+                ic_info.get("road_name", ""),
+            )
 
         # 메타데이터 조립
         metadata = {

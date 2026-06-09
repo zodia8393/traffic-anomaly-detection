@@ -37,3 +37,6 @@ src/layer3_mllm/eval/results/
 
 # 데모/분석 산출물
 output/
+
+# 외부 협업자 RAG 참고 복사본(JHJ, 리뷰용)
+사고분석_설계/external/

@@ -8,7 +8,7 @@ import os
 import sys
 
 # 루트 경로 — 환경변수로 오버라이드 가능 (배포 이식성). 미설정 시 기본값.
-ROOT = Path(os.environ.get("CCTV_PRJ_ROOT", "/workspace/prj_cctv"))
+ROOT = Path(os.environ.get("CCTV_PRJ_ROOT", "/workspace/prj/cctv"))
 NEW_ROOT = Path(os.environ.get("CCTV_ANALYSIS_ROOT", str(ROOT / "사고분석_설계")))
 
 # 기존 파이프라인 경로 추가
@@ -124,6 +124,27 @@ ML_MODEL_GATES = {
 ENABLE_LAYER4_PREDICTION = False     # XGBoost 사고예측 — 학습데이터/모델 준비 후 True
 ENABLE_RAG = False                   # RAG 보강 — 미배선
 ENABLE_SELF_TRAINING = False         # 자기강화 루프 — 미배선
+
+# ── 외부 RAG 지식베이스 연계 (DB 파일 플러그인) ───────────────────────
+# 외부 협업자가 구축한 RAG DB(사고/차단시간 지식)를 파일로 받아 즉시 결합.
+# RAG_DB_PATH에 파일이 존재하면 자동 활성(없으면 안전 무동작 → similar_cases=[]).
+RAG_DB_PATH = os.environ.get("RAG_DB_PATH", str(DATA_DIR / "rag_knowledge.duckdb"))
+# 청크 스키마 매핑 (JHJ RAG 호환 기본값, 협업자 스키마 다르면 env로 오버라이드)
+RAG_CHUNKS_TABLE = os.environ.get("RAG_CHUNKS_TABLE", "chunks")
+RAG_EMBED_TABLE = os.environ.get("RAG_EMBED_TABLE", "chunk_embeddings")
+RAG_DOCS_TABLE = os.environ.get("RAG_DOCS_TABLE", "documents")
+# 쿼리 임베더 — DB 임베딩과 모델 일치 필요. 불가 시 키워드 전용으로 자동 강등(DB만 있어도 작동).
+RAG_EMBED_PROVIDER = os.environ.get("RAG_EMBED_PROVIDER", "auto")  # auto|ollama|sbert|none
+RAG_OLLAMA_URL = os.environ.get("RAG_OLLAMA_URL", "http://localhost:11434")
+RAG_EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "")            # 미지정 시 DB에서 자동 감지
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
+RAG_RRF_K = int(os.environ.get("RAG_RRF_K", "60"))                 # RRF 융합 상수(스케일 무관)
+RAG_CACHE_TTL_SEC = int(os.environ.get("RAG_CACHE_TTL_SEC", "300"))  # 임베딩 행렬 캐시 갱신주기
+# 관련도 게이트 — 키워드/벡터 신호가 전혀 없는 청크는 반환 금지(무관 사례 주입 방지)
+RAG_SIM_FLOOR = float(os.environ.get("RAG_SIM_FLOOR", "0.25"))     # 벡터 cosine 최소 관련도
+# 쿼리 임베더는 DB 임베딩 모델과 정확히 일치할 때만 벡터검색(차원우연 cross-space 방지)
+RAG_REQUIRE_EXACT_MODEL = os.environ.get("RAG_REQUIRE_EXACT_MODEL", "1") == "1"
+RAG_MAX_CHUNKS = int(os.environ.get("RAG_MAX_CHUNKS", "500000"))   # 캐시 행렬 상한(OOM 방지)
 
 # ── 전국 스케일업 (3-Tier) ────────────────────────────────────────────
 NATIONWIDE_MAX_CAMERAS = 1600        # 전체 가동 기본 상한 (RAM 40GB 기준, ITS 4760대 중)

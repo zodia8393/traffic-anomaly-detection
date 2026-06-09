@@ -107,13 +107,17 @@ class ReportIndexer:
     # ------------------------------------------------------------------
     # 유사 사례 검색
     # ------------------------------------------------------------------
-    def search_similar(self, query_text: str, top_k: int = 3) -> list[dict]:
+    def search_similar(self, query_text: str | None = None, top_k: int = 3,
+                       accident_type: str | None = None,
+                       road_name: str | None = None) -> list[dict]:
         """코사인 유사도로 유사 사례 상위 top_k 건을 반환한다.
 
         Parameters
         ----------
-        query_text : str
-            검색 쿼리 (예: "경부 부산 추돌 화물차 안전거리").
+        query_text : str | None
+            검색 쿼리 (예: "경부 부산 추돌 화물차 안전거리"). None이면
+            accident_type/road_name으로 조립(report_generator 호환 — 기존 시그니처
+            불일치로 similar_cases가 항상 빈 리스트였던 버그 수정).
         top_k : int
             반환 건수.
 
@@ -123,6 +127,10 @@ class ReportIndexer:
             report_id, score, road_name, direction, accident_type,
             cause, vehicles_summary 등을 담은 dict 목록.
         """
+        if query_text is None:
+            query_text = " ".join(str(x) for x in (road_name, accident_type) if x)
+        if not query_text:
+            return []
         if self._sbert is not None:
             return self._search_sbert(query_text, top_k)
         return self._search_tfidf(query_text, top_k)
