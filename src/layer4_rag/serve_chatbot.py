@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,10 +51,10 @@ button:disabled{opacity:.5}.chk{display:flex;align-items:center;gap:5px;color:va
 <div id=chat></div>
 <form id=f><div class=row><input id=q placeholder="예: 경부선 화물차 전복 적재물유출 차단시간은?" autocomplete=off autofocus>
 <button id=send>전송</button></div>
-<label class=chk><input type=checkbox id=llm> AI 문장답변(느림, ~30초)</label></form>
+<label class=chk><input type=checkbox id=llm checked> AI 종합답변(상시 로드 · 끄면 빠른 검색)</label></form>
 <script>
 const chat=document.getElementById('chat'),f=document.getElementById('f'),q=document.getElementById('q'),send=document.getElementById('send');
-fetch('/health').then(r=>r.json()).then(d=>{document.getElementById('meta').textContent=d.ok?`지식 ${d.chunks}건 · ${d.model}`:'RAG 미연결'});
+fetch('/health').then(r=>r.json()).then(d=>{document.getElementById('meta').textContent=d.ok?`지식 ${d.chunks}건 · ${d.model} · LLM ${d.llm}`:'RAG 미연결'});
 function add(t,cls){const m=document.createElement('div');m.className='msg '+cls;const b=document.createElement('div');b.className='bub';if(typeof t=='string')b.textContent=t;else b.appendChild(t);m.appendChild(b);chat.appendChild(m);window.scrollTo(0,9e9);return b;}
 function render(d){const w=document.createElement('div');const a=document.createElement('div');a.textContent=d.answer;w.appendChild(a);
 if(d.stats){const s=document.createElement('div');s.className='stats';for(const[k,lbl]of[['avg','평균(분)'],['median','중앙값'],['min','최소'],['max','최대'],['n','사례수']]){const c=document.createElement('div');c.className='stat';c.innerHTML=`<b>${d.stats[k]}</b><span>${lbl}</span>`;s.appendChild(c);}w.appendChild(s);}
@@ -81,7 +82,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/health":
             r = _BOT.r
             self._send(200, json.dumps({"ok": _BOT.available, "chunks": len(r._meta) if r._meta else 0,
-                                        "model": r._embed_model_name or "키워드"}))
+                                        "model": r._embed_model_name or "키워드",
+                                        "llm": "상시" if _BOT._client is not None else "off"}))
         else:
             self._send(404, "{}")
 
@@ -104,16 +106,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--llm", action="store_true")
+    ap.add_argument("--fast", action="store_true", help="LLM 비활성(검색+통계만, 경량)")
     args = ap.parse_args()
 
-    print("RAG 챗봇 로딩(임베더 포함)…", flush=True)
-    _BOT = RagChatbot(use_llm=args.llm)
+    print("RAG 챗봇 로딩(임베더)…", flush=True)
+    _BOT = RagChatbot(use_llm=not args.fast)
     if not _BOT.available:
         print("⚠️ RAG DB(rag_knowledge.duckdb) 미연결 — RAG_DB_PATH 확인", flush=True)
     else:
         _BOT.r._ensure_cache()
-        print(f"✅ 준비: 청크 {len(_BOT.r._meta)}, 임베더 {_BOT.r._embed_model_name}", flush=True)
+        print(f"✅ RAG 준비: 청크 {len(_BOT.r._meta)}, 임베더 {_BOT.r._embed_model_name}", flush=True)
+    if not args.fast:
+        print("LLM(Qwen) 사전로딩 + 워밍업…", flush=True)
+        t = time.time()
+        from layer3_mllm.mllm_client import MLLMClient
+        _BOT._client = MLLMClient(backend="transformers")
+        try:  # 워밍업 추론 — 가중치 폴트인해 첫 사용자 질문도 빠르게
+            _BOT._client.chat([{"role": "user", "content": "안녕"}], max_tokens=4, parse_json=False)
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"✅ LLM 상시대기·워밍업 완료 ({time.time()-t:.0f}초)", flush=True)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"🌐 http://localhost:{args.port}  (Ctrl+C 종료)", flush=True)
     srv.serve_forever()

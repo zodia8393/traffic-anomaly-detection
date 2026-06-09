@@ -89,13 +89,62 @@ class RagChatbot:
         return self._grounded_answer(hits, closures)
 
     def ask_structured(self, question: str, top_k: int = 5) -> dict:
-        """웹/API용 구조화 응답: {answer, stats, cases}. 의도별 라우팅."""
+        """하이브리드 지능: 구조화 SQL 사실 + 벡터 RAG 사례 + 통계 → (LLM)종합 답변.
+
+        - 정확한 사실(최근/건수/최대)은 SQL로, 의미 사례는 벡터로, 차단시간은 통계로.
+        - use_llm이면 이 근거들을 LLM이 자연어로 종합(숫자 그대로 인용, 환각 억제).
+        - 아니면 구조화 답변(있으면) 또는 통계 요약(빠름).
+        """
         intent = self._intent(question)
-        if intent != "semantic" and self._db is not None:
-            out = self._structured_answer(intent, question, top_k)
-            if out is not None:
-                return out
-        return self._semantic_answer(question, top_k)
+        struct = (self._structured_answer(intent, question, top_k)
+                  if intent != "semantic" and self._db is not None else None)
+        # 의미 사례 + 차단시간 통계 (항상 — LLM 근거/폴백용)
+        hits = self.r.search(question, top_k=top_k)
+        closures = [int(m.group(1)) for h in hits
+                    if (m := _CLOSURE_RE.search(h.get("excerpt", "") or h.get("chunk_text", "")))]
+        sem_stats = None
+        if closures:
+            a = np.array(closures)
+            sem_stats = {"n": len(closures), "avg": round(float(a.mean())),
+                         "median": int(np.median(a)), "min": int(a.min()), "max": int(a.max())}
+
+        if struct:
+            fact, stats, cases = struct["answer"], struct.get("stats"), struct["cases"]
+        elif hits:
+            fact, stats = None, sem_stats
+            cases = [{"text": h.get("excerpt", ""), "score": h.get("score", 0)} for h in hits]
+        else:
+            return {"answer": "관련 사고 기록을 못 찾았어요. 노선·사고유형·차량 중심으로 물어봐 주세요.",
+                    "stats": None, "cases": []}
+
+        if self.use_llm:
+            answer = self._smart_llm_answer(question, fact, cases, stats or sem_stats)
+        else:
+            answer = fact if fact else self._grounded_answer(hits, closures)
+        return {"answer": answer, "stats": stats, "cases": cases}
+
+    def _smart_llm_answer(self, question: str, fact: str | None,
+                          cases: list[dict], stats: dict | None) -> str:
+        """구조화 사실 + 사례 + 통계를 LLM이 근거기반으로 종합."""
+        if self._client is None:
+            from layer3_mllm.mllm_client import MLLMClient
+            self._client = MLLMClient(backend="transformers")
+        parts = []
+        if fact:
+            parts.append(f"[확인된 사실]\n{fact}")
+        if cases:
+            parts.append("[관련 실사고 기록]\n" + "\n".join(f"- {c['text'][:150]}" for c in cases[:5]))
+        if stats and stats.get("avg") is not None:
+            parts.append(f"[차단시간 통계] 평균 {stats['avg']}분, 중앙값 {stats.get('median')}분, "
+                         f"범위 {stats.get('min')}~{stats.get('max')}분 (n={stats.get('n')})")
+        ctx = "\n\n".join(parts) or "(근거 없음)"
+        prompt = ("당신은 고속도로 사고·차단시간 분석 전문가입니다. 아래 근거만 사용해 질문에 "
+                  "한국어로 간결하고 자연스럽게(2~4문장) 답하시오. 숫자·날짜·노선명은 근거 그대로 "
+                  "인용하고, 근거에 없는 내용은 추측하지 마시오. 마지막에 핵심 수치를 한 번 더 짚어주면 좋습니다.\n\n"
+                  f"{ctx}\n\n질문: {question}\n답변:")
+        res = self._client.chat([{"role": "user", "content": prompt}], max_tokens=320, parse_json=False)
+        c = res.get("content")
+        return (c if isinstance(c, str) else str(c)).strip() or (fact or "답변 생성에 실패했습니다.")
 
     # ── 복합 필터 빌더 (노선+유형+차량+원인) ─────────────────────────
     def _build_where(self, q: str):
