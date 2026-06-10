@@ -28,8 +28,8 @@ from typing import Any
 
 # ── 경로 설정 ────────────────────────────────────────────────────────
 _THIS_DIR = Path(__file__).resolve().parent
-PIPELINE_SRC = Path("/workspace/prj_cctv/pipeline/src")
-ACCIDENT_SRC = Path("/workspace/prj_cctv/사고분석_설계/src")
+PIPELINE_SRC = Path("/workspace/prj/cctv/pipeline/src")
+ACCIDENT_SRC = Path("/workspace/prj/cctv/사고분석_설계/src")
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
@@ -74,25 +74,16 @@ from config_new import (
 from stream_manager import StreamManager
 from incident_reactor import IncidentReactor
 from layer1_vision.prefilter import PreFilter, PreFilterResult
-from run_realtime import (
+# run_realtime 분해 후: entrypoint 경유 대신 정식 모듈에서 직접 import
+from realtime_bootstrap import (
     CollectionRecord,
-    IncidentVerifier,
-    OnDemandRecorder,
-    save_collection_record,
-    SAVE_DIR,
-    META_DIR,
-    LOG_DIR,
-    PENDING_DIR,
-    SEVERITY_GATE,
-    SEVERITY_PENDING,
-    SEVERITY_FORCE_PRESERVE,
-    PENDING_MAX_RETRIES,
-    PENDING_RETRY_INTERVAL_SEC,
-    RECORD_TRIGGER_TYPES,
-    CONSENSUS_WINDOW_SEC,
-    CONSENSUS_MIN_TYPES,
-    INSTANT_RECORD_TYPES,
+    SAVE_DIR, META_DIR, LOG_DIR, PENDING_DIR,
+    SEVERITY_GATE, SEVERITY_PENDING, SEVERITY_FORCE_PRESERVE,
+    PENDING_MAX_RETRIES, PENDING_RETRY_INTERVAL_SEC, RECORD_TRIGGER_TYPES,
+    CONSENSUS_WINDOW_SEC, CONSENSUS_MIN_TYPES, INSTANT_RECORD_TYPES,
 )
+from ondemand_recorder import OnDemandRecorder, save_collection_record
+from incident_verifier import IncidentVerifier
 
 # Phase 2: config 교체 → pipeline/src (detector, tracker lazy import용)
 import importlib.util as _ilu
@@ -1456,7 +1447,7 @@ def main():
         )
         pipeline.start()
     elif args.command == "status":
-        from run_realtime import RealtimeAccidentPipeline
+        from realtime_pipeline import RealtimeAccidentPipeline
         RealtimeAccidentPipeline().status()
     else:
         parser.print_help()

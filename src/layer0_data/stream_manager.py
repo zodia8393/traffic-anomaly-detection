@@ -24,7 +24,7 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from track3_cctv_stream import CCTVInfo, ITSCCTVClient
-from run_realtime import FrameSampler
+from frame_sampler import FrameSampler
 from config_new import (
     STREAM_MAX_FAILURES,
     STREAM_RECONNECT_DELAY_SEC,
