@@ -55,6 +55,23 @@ class RagChatbot:
             return "severe"
         return "semantic"
 
+    def _is_followup(self, q: str) -> bool:
+        """후속질문 판정 — 지칭어 또는 새 엔티티 없는 짧은 보충."""
+        if self._intent(q) != "semantic":
+            return False  # 최근/건수/최대 등은 독립 질의로 처리
+        t = q.replace(" ", "")
+        markers = ("그사고", "그거", "거기", "그게", "그건", "그때", "방금", "아까",
+                   "위사고", "해당", "이사고", "그곳", "더자세", "방금그", "위에서")
+        if any(m in t for m in markers):
+            return True
+        # 새 엔티티(노선/유형/차량/원인)가 없는 의미질의 = 직전 사고 보충질문
+        ent = ("전면차단", "부분차단", "갓길", "화물차", "트레일러", "버스", "승용차",
+               "이륜", "오토바이", "터널", "화재", "빗길", "결빙", "졸음", "과속",
+               "역주행", "추돌", "전복", "적재물")
+        if not self._line_filter(q) and not any(e in t for e in ent):
+            return True  # "원인은?", "차단시간은?", "몇 명?", "더 알려줘" 등
+        return False
+
     def _line_filter(self, q: str):
         """질문에서 노선명 추출(있으면 SQL 필터)."""
         if self._db is None:
@@ -88,13 +105,22 @@ class RagChatbot:
             return self._llm_answer(question, hits, closures)
         return self._grounded_answer(hits, closures)
 
-    def ask_structured(self, question: str, top_k: int = 5) -> dict:
+    def ask_structured(self, question: str, top_k: int = 5,
+                       history: list[dict] | None = None) -> dict:
         """하이브리드 지능: 구조화 SQL 사실 + 벡터 RAG 사례 + 통계 → (LLM)종합 답변.
 
         - 정확한 사실(최근/건수/최대)은 SQL로, 의미 사례는 벡터로, 차단시간은 통계로.
-        - use_llm이면 이 근거들을 LLM이 자연어로 종합(숫자 그대로 인용, 환각 억제).
+        - use_llm이면 이 근거들 + 이전 대화 맥락(history)을 LLM이 종합(멀티턴).
         - 아니면 구조화 답변(있으면) 또는 통계 요약(빠름).
+
+        history: [{"q":..,"a":..}, ...] 이전 대화 (멀티턴 — 후속질문 맥락).
         """
+        # 후속질문(지칭어·짧은 보충)이면 새 검색 없이 대화 맥락으로만 답
+        # (엉뚱한 사고가 새로 검색돼 이전 맥락을 덮는 것 방지)
+        if self.use_llm and history and self._is_followup(question):
+            ans = self._smart_llm_answer(question, None, [], None, history)
+            return {"answer": ans, "stats": None, "cases": []}
+
         intent = self._intent(question)
         struct = (self._structured_answer(intent, question, top_k)
                   if intent != "semantic" and self._db is not None else None)
@@ -118,14 +144,21 @@ class RagChatbot:
                     "stats": None, "cases": []}
 
         if self.use_llm:
-            answer = self._smart_llm_answer(question, fact, cases, stats or sem_stats)
+            answer = self._smart_llm_answer(question, fact, cases, stats or sem_stats, history)
         else:
             answer = fact if fact else self._grounded_answer(hits, closures)
         return {"answer": answer, "stats": stats, "cases": cases}
 
-    def _smart_llm_answer(self, question: str, fact: str | None,
-                          cases: list[dict], stats: dict | None) -> str:
-        """구조화 사실 + 사례 + 통계를 LLM이 근거기반으로 종합."""
+    _SYSTEM = ("당신은 고속도로 사고·차단시간 분석 전문가입니다. 이전 대화 맥락을 고려해, "
+               "주어진 근거(확인된 사실/실사고 기록/통계)만 사용해 한국어로 간결하고 자연스럽게"
+               "(1~3문장) 답하세요. **근거·이전 답변에 있는 단어·숫자·용어를 그대로 사용하고, "
+               "새로운 용어를 지어내거나 의미를 바꾸지 마세요.** 후속 질문이면 바로 앞에서 말한 "
+               "사고를 가리키는 것으로 이해하고, 그 사고의 정보를 이전 답변에서 찾아 답하세요. "
+               "근거에 없으면 '기록에 없습니다'라고 하세요.")
+
+    def _smart_llm_answer(self, question: str, fact: str | None, cases: list[dict],
+                          stats: dict | None, history: list[dict] | None = None) -> str:
+        """구조화 사실 + 사례 + 통계 + 이전 대화 맥락을 LLM이 근거기반 멀티턴 종합."""
         if self._client is None:
             from layer3_mllm.mllm_client import MLLMClient
             self._client = MLLMClient(backend="transformers")
@@ -137,12 +170,16 @@ class RagChatbot:
         if stats and stats.get("avg") is not None:
             parts.append(f"[차단시간 통계] 평균 {stats['avg']}분, 중앙값 {stats.get('median')}분, "
                          f"범위 {stats.get('min')}~{stats.get('max')}분 (n={stats.get('n')})")
-        ctx = "\n\n".join(parts) or "(근거 없음)"
-        prompt = ("당신은 고속도로 사고·차단시간 분석 전문가입니다. 아래 근거만 사용해 질문에 "
-                  "한국어로 간결하고 자연스럽게(2~4문장) 답하시오. 숫자·날짜·노선명은 근거 그대로 "
-                  "인용하고, 근거에 없는 내용은 추측하지 마시오. 마지막에 핵심 수치를 한 번 더 짚어주면 좋습니다.\n\n"
-                  f"{ctx}\n\n질문: {question}\n답변:")
-        res = self._client.chat([{"role": "user", "content": prompt}], max_tokens=320, parse_json=False)
+        ctx = "\n\n".join(parts) or "(이번 질문 관련 새 근거 없음 — 이전 대화 맥락 참고)"
+        # 멀티턴 메시지: system + 이전 turn들 + (근거+현재질문)
+        messages = [{"role": "system", "content": self._SYSTEM}]
+        for turn in (history or [])[-4:]:
+            if turn.get("q"):
+                messages.append({"role": "user", "content": turn["q"]})
+            if turn.get("a"):
+                messages.append({"role": "assistant", "content": turn["a"]})
+        messages.append({"role": "user", "content": f"{ctx}\n\n질문: {question}"})
+        res = self._client.chat(messages, max_tokens=320, parse_json=False)
         c = res.get("content")
         return (c if isinstance(c, str) else str(c)).strip() or (fact or "답변 생성에 실패했습니다.")
 

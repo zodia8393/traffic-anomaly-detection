@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from layer4_rag.chatbot import RagChatbot
 
 _BOT: RagChatbot | None = None
+_SESSIONS: dict[str, list[dict]] = {}   # session_id -> [{"q","a"}, ...] 대화 이력
+_SLOCK = threading.Lock()
+_MAX_TURNS = 8
 
 PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -29,7 +33,8 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
 :root{--bg:#0f1419;--panel:#1a212b;--accent:#3b9eff;--mut:#8b97a7;--ok:#2ec27e}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:#e6edf3;font-family:'Apple SD Gothic Neo',sans-serif}
 header{padding:14px 20px;background:#0b2540;border-bottom:1px solid #1f3a5f;display:flex;align-items:center;gap:10px}
-header b{font-size:17px}header span{color:var(--mut);font-size:13px}
+header b{font-size:17px}header span{color:var(--mut);font-size:13px;flex:1}
+#reset{padding:6px 12px;border:1px solid #2a4866;border-radius:8px;background:#13243a;color:#9fc3ff;font-size:13px;cursor:pointer}
 #chat{max-width:860px;margin:0 auto;padding:18px 16px 120px}
 .msg{margin:14px 0;display:flex}.msg.u{justify-content:flex-end}
 .bub{max-width:80%;padding:12px 15px;border-radius:14px;line-height:1.55;white-space:pre-wrap;font-size:14.5px}
@@ -47,13 +52,15 @@ button{padding:0 22px;border:0;border-radius:12px;background:var(--accent);color
 button:disabled{opacity:.5}.chk{display:flex;align-items:center;gap:5px;color:var(--mut);font-size:12px;max-width:860px;margin:6px auto 0}
 .load{color:var(--mut);font-style:italic}
 </style></head><body>
-<header><b>🤖 사고 차단시간 RAG</b><span id=meta>연결 중…</span></header>
+<header><b>🤖 사고 차단시간 RAG</b><span id=meta>연결 중…</span><button id=reset>＋ 새 대화</button></header>
 <div id=chat></div>
 <form id=f><div class=row><input id=q placeholder="예: 경부선 화물차 전복 적재물유출 차단시간은?" autocomplete=off autofocus>
 <button id=send>전송</button></div>
 <label class=chk><input type=checkbox id=llm checked> AI 종합답변(상시 로드 · 끄면 빠른 검색)</label></form>
 <script>
 const chat=document.getElementById('chat'),f=document.getElementById('f'),q=document.getElementById('q'),send=document.getElementById('send');
+const SID=(window.crypto&&crypto.randomUUID&&crypto.randomUUID())||('s'+Date.now()+Math.random().toString(36).slice(2));
+document.getElementById('reset').onclick=async()=>{await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:SID})});chat.innerHTML='';q.focus();};
 fetch('/health').then(r=>r.json()).then(d=>{document.getElementById('meta').textContent=d.ok?`지식 ${d.chunks}건 · ${d.model} · LLM ${d.llm}`:'RAG 미연결'});
 function add(t,cls){const m=document.createElement('div');m.className='msg '+cls;const b=document.createElement('div');b.className='bub';if(typeof t=='string')b.textContent=t;else b.appendChild(t);m.appendChild(b);chat.appendChild(m);window.scrollTo(0,9e9);return b;}
 function render(d){const w=document.createElement('div');const a=document.createElement('div');a.textContent=d.answer;w.appendChild(a);
@@ -61,7 +68,7 @@ if(d.stats){const s=document.createElement('div');s.className='stats';for(const[
 (d.cases||[]).forEach(c=>{const e=document.createElement('div');e.className='case';e.innerHTML=`<span class=sc>${(c.score*100).toFixed(1)}</span>${c.text.replace(/</g,'&lt;')}`;w.appendChild(e);});return w;}
 f.onsubmit=async ev=>{ev.preventDefault();const text=q.value.trim();if(!text)return;add(text,'u');q.value='';send.disabled=true;
 const l=add('검색 중…','b');l.className='bub load';
-try{const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text,llm:document.getElementById('llm').checked})});
+try{const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text,llm:document.getElementById('llm').checked,session:SID})});
 const d=await r.json();l.parentElement.remove();add(render(d),'b');}catch(e){l.textContent='오류: '+e;}send.disabled=false;q.focus();};
 </script></body></html>"""
 
@@ -88,13 +95,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "{}")
 
     def do_POST(self):
-        if self.path != "/ask":
+        if self.path not in ("/ask", "/reset"):
             self._send(404, "{}"); return
         try:
             n = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(n) or b"{}")
+            sid = str(data.get("session", "default"))
+            if self.path == "/reset":
+                with _SLOCK:
+                    _SESSIONS.pop(sid, None)
+                self._send(200, json.dumps({"ok": True})); return
+            # /ask — 세션 대화 이력 적용 (멀티턴)
+            with _SLOCK:
+                history = list(_SESSIONS.get(sid, []))
             _BOT.use_llm = bool(data.get("llm"))
-            out = _BOT.ask_structured(str(data.get("question", "")).strip(), top_k=5)
+            q = str(data.get("question", "")).strip()
+            out = _BOT.ask_structured(q, top_k=5, history=history)
+            with _SLOCK:
+                h = _SESSIONS.setdefault(sid, [])
+                h.append({"q": q, "a": out["answer"]})
+                if len(h) > _MAX_TURNS:
+                    del h[:-_MAX_TURNS]
             self._send(200, json.dumps(out, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             self._send(500, json.dumps({"answer": "서버 오류: " + traceback.format_exc()[-300:],
