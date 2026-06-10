@@ -257,25 +257,6 @@ class RagChatbot:
             f"SELECT chunk_text FROM chunks WHERE {cond} ORDER BY {order} LIMIT {k}", params).fetchall()
         return [{"text": r[0], "score": 1.0} for r in rows]
 
-    # ── 의미 질의 (벡터 RAG) ─────────────────────────────────────────
-    def _semantic_answer(self, question: str, top_k: int) -> dict:
-        hits = self.r.search(question, top_k=top_k)
-        closures = []
-        for h in hits:
-            m = _CLOSURE_RE.search(h.get("excerpt", "") or h.get("chunk_text", ""))
-            if m:
-                closures.append(int(m.group(1)))
-        stats = None
-        if closures:
-            arr = np.array(closures)
-            stats = {"n": len(closures), "avg": round(float(arr.mean())),
-                     "median": int(np.median(arr)), "min": int(arr.min()), "max": int(arr.max())}
-        answer = (self._llm_answer(question, hits, closures) if (self.use_llm and hits)
-                  else self._grounded_answer(hits, closures) if hits
-                  else "관련 사고 기록을 찾지 못했습니다. 노선·사고유형·차량 중심으로 질문해 보세요.")
-        cases = [{"text": h.get("excerpt", ""), "score": h.get("score", 0)} for h in hits]
-        return {"answer": answer, "stats": stats, "cases": cases}
-
     def _grounded_answer(self, hits: list[dict], closures: list[int]) -> str:
         # 사례는 아래 카드로 표시되므로 답변은 자연스러운 요약만 (중복 제거)
         if closures:
