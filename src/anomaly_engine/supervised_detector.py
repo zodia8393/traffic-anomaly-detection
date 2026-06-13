@@ -20,7 +20,7 @@ except ImportError:  # 스크립트 직접 실행 시
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = Path("/workspace/prj_cctv/사고분석_설계/models/supervised_detector.pkl")
+DEFAULT_MODEL = Path("/workspace/prj/cctv/사고분석_설계/models/supervised_detector.pkl")
 
 
 class SupervisedTrajectoryDetector:

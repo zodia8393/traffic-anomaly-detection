@@ -18,7 +18,8 @@ VisionPipeline → FeatureStore → RuleEngine → EnsembleScorer → Alerter
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -39,6 +40,7 @@ class FrameResult:
     violations: list[RuleViolation]
     ensemble: EnsembleResult
     alert: AlertEvent | None = None
+    shadow: bool = False
 
 
 class AnomalyEngine:
@@ -55,7 +57,15 @@ class AnomalyEngine:
         on_alarm: Callable[[AlertEvent], None] | None = None,
         alert_threshold: float = 0.3,
         alarm_threshold: float = 0.7,
+        emit_alerts: bool = True,
+        shadow_log_dir: Path | None = None,
+        shadow_min_score: float = 0.3,
     ):
+        self.camera_id = camera_id
+        self.emit_alerts = emit_alerts
+        self.shadow_log_dir = shadow_log_dir
+        self.shadow_min_score = shadow_min_score
+
         # Level 0: 카메라 설정
         if camera_config:
             self.camera_config = camera_config
@@ -93,8 +103,8 @@ class AnomalyEngine:
 
         self._frame_count = 0
         logger.info(
-            "AnomalyEngine 초기화: camera=%s, rules=%d개",
-            camera_id, len(self.rule_engine.rules),
+            "AnomalyEngine 초기화: camera=%s, rules=%d개, emit_alerts=%s",
+            camera_id, len(self.rule_engine.rules), self.emit_alerts,
         )
 
     def process_frame(
@@ -104,6 +114,7 @@ class AnomalyEngine:
         ttc_list: list[dict[str, Any]],
         dt: float = 1.0,
         ml_scores: dict[str, float] | None = None,
+        frame_idx: int | None = None,
     ) -> FrameResult:
         """단일 프레임 처리 — 전체 파이프라인 실행.
 
@@ -132,16 +143,62 @@ class AnomalyEngine:
 
         # 4. 알림 판정
         alert_event = None
-        if ensemble_result.trigger or ensemble_result.final_score >= self.alerter.alert_threshold:
+        if self.emit_alerts and (
+            ensemble_result.trigger or ensemble_result.final_score >= self.alerter.alert_threshold
+        ):
             alert_event = self.alerter.process(ensemble_result, timestamp)
 
-        return FrameResult(
+        result = FrameResult(
             timestamp=timestamp,
             features_updated=len(features),
             violations=violations,
             ensemble=ensemble_result,
             alert=alert_event,
+            shadow=not self.emit_alerts,
         )
+        if not self.emit_alerts:
+            self._write_shadow_event(result, frame_idx)
+        return result
+
+    def _write_shadow_event(self, result: FrameResult, frame_idx: int | None) -> None:
+        """Shadow mode 진단 이벤트를 JSONL로 저장한다.
+
+        운영 트리거와 분리된 관측 로그다. 점수·규칙·ML 신호가 모두 없으면 기록하지
+        않아 장기 운영 시 로그 폭주를 줄인다.
+        """
+        if self.shadow_log_dir is None:
+            return
+        if (
+            result.ensemble.final_score < self.shadow_min_score
+            and not result.violations
+            and not result.ensemble.ml_scores
+        ):
+            return
+        self.shadow_log_dir.mkdir(parents=True, exist_ok=True)
+        path = self.shadow_log_dir / f"{self.camera_id}.jsonl"
+        row = {
+            "camera_id": self.camera_id,
+            "frame_idx": frame_idx,
+            "timestamp": result.timestamp,
+            "features_updated": result.features_updated,
+            "final_score": float(result.ensemble.final_score),
+            "trigger": bool(result.ensemble.trigger),
+            "trigger_reason": result.ensemble.trigger_reason,
+            "ml_scores": {k: float(v) for k, v in result.ensemble.ml_scores.items()},
+            "violations": [
+                {
+                    "rule_id": v.rule_id,
+                    "label": v.label,
+                    "severity": v.severity,
+                    "score": float(v.score),
+                    "tracks": v.involved_tracks,
+                    "details": v.details,
+                }
+                for v in result.violations[:5]
+            ],
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
     @property
     def stats(self) -> dict[str, Any]:

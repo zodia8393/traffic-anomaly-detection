@@ -88,10 +88,12 @@ class ITSCCTVClient:
 
         try:
             resp = requests.get(url, params=params, timeout=30)
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                logger.error("ITS CCTV API 실패: HTTP %s", resp.status_code)
+                return []
             data = resp.json()
         except Exception as e:
-            logger.error("ITS CCTV API 실패: %s", e)
+            logger.error("ITS CCTV API 실패: %s", type(e).__name__)
             return []
 
         cctvs = []

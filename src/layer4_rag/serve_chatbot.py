@@ -43,8 +43,11 @@ header b{font-size:17px}header span{color:var(--mut);font-size:13px;flex:1}
 .stats{display:flex;gap:14px;margin:8px 0 4px;flex-wrap:wrap}
 .stat{background:#13202e;border:1px solid #234;border-radius:10px;padding:8px 12px;text-align:center}
 .stat b{display:block;font-size:20px;color:var(--ok)}.stat span{font-size:11px;color:var(--mut)}
+.trace{margin-top:8px;color:#9aa8b8;font-size:12px}
+.tag{display:inline-block;margin:0 5px 5px 0;padding:2px 7px;border:1px solid #2b4058;border-radius:999px;background:#111d29;color:#b9c7d6}
 .case{margin:6px 0;padding:9px 11px;background:#10171f;border-left:3px solid var(--accent);border-radius:6px;font-size:13px;color:#c4d0dc}
 .case .sc{color:var(--mut);font-size:11px;float:right}
+.case .cid{color:#8aa4c5;font-size:11px;margin-right:6px}
 form{position:fixed;bottom:0;left:0;right:0;background:#0b1119;border-top:1px solid #1f2a36;padding:12px}
 .row{max-width:860px;margin:0 auto;display:flex;gap:8px}
 input{flex:1;padding:13px 15px;border-radius:12px;border:1px solid #2a3744;background:#121a23;color:#e6edf3;font-size:15px;outline:none}
@@ -61,11 +64,12 @@ button:disabled{opacity:.5}.chk{display:flex;align-items:center;gap:5px;color:va
 const chat=document.getElementById('chat'),f=document.getElementById('f'),q=document.getElementById('q'),send=document.getElementById('send');
 const SID=(window.crypto&&crypto.randomUUID&&crypto.randomUUID())||('s'+Date.now()+Math.random().toString(36).slice(2));
 document.getElementById('reset').onclick=async()=>{await fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:SID})});chat.innerHTML='';q.focus();};
-fetch('/health').then(r=>r.json()).then(d=>{document.getElementById('meta').textContent=d.ok?`지식 ${d.chunks}건 · ${d.model} · LLM ${d.llm}`:'RAG 미연결'});
+fetch('/health').then(r=>r.json()).then(d=>{document.getElementById('meta').textContent=d.ok?`지식 ${d.chunks}건 · 검색 ${d.search} · ${d.model} · LLM ${d.llm}`:'RAG 미연결'});
 function add(t,cls){const m=document.createElement('div');m.className='msg '+cls;const b=document.createElement('div');b.className='bub';if(typeof t=='string')b.textContent=t;else b.appendChild(t);m.appendChild(b);chat.appendChild(m);window.scrollTo(0,9e9);return b;}
 function render(d){const w=document.createElement('div');const a=document.createElement('div');a.textContent=d.answer;w.appendChild(a);
-if(d.stats){const s=document.createElement('div');s.className='stats';for(const[k,lbl]of[['avg','평균(분)'],['median','중앙값'],['min','최소'],['max','최대'],['n','사례수']]){const c=document.createElement('div');c.className='stat';c.innerHTML=`<b>${d.stats[k]}</b><span>${lbl}</span>`;s.appendChild(c);}w.appendChild(s);}
-(d.cases||[]).forEach(c=>{const e=document.createElement('div');e.className='case';e.innerHTML=`<span class=sc>${(c.score*100).toFixed(1)}</span>${c.text.replace(/</g,'&lt;')}`;w.appendChild(e);});return w;}
+if(d.meta){const tr=document.createElement('div');tr.className='trace';for(const[k,lbl]of[['intent','의도'],['source','근거'],['scope','범위'],['search','검색'],['quality','신뢰도'],['quality_reason','신뢰도근거']]){if(!d.meta[k])continue;const t=document.createElement('span');t.className='tag';t.textContent=`${lbl}: ${d.meta[k]}`;tr.appendChild(t);}if(tr.children.length)w.appendChild(tr);}
+if(d.stats){const s=document.createElement('div');s.className='stats';const labels=[['avg','평균(분)'],['median','중앙값'],['min','최소'],['max','최대'],['최대분','최대(분)'],['인명피해','인명피해'],['n','사례수']];for(const[k,lbl]of labels){if(d.stats[k]===undefined||d.stats[k]===null)continue;const c=document.createElement('div');c.className='stat';c.innerHTML=`<b>${d.stats[k]}</b><span>${lbl}</span>`;s.appendChild(c);}if(s.children.length)w.appendChild(s);}
+(d.cases||[]).forEach(c=>{const e=document.createElement('div');e.className='case';const cid=c.chunk_id?`<span class=cid>${String(c.chunk_id).replace(/</g,'&lt;')}</span>`:'';const score=(typeof c.score==='number')?`<span class=sc>${(c.score*100).toFixed(1)}</span>`:'';e.innerHTML=`${score}${cid}${c.text.replace(/</g,'&lt;')}`;w.appendChild(e);});return w;}
 f.onsubmit=async ev=>{ev.preventDefault();const text=q.value.trim();if(!text)return;add(text,'u');q.value='';send.disabled=true;
 const l=add('검색 중…','b');l.className='bub load';
 try{const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:text,llm:document.getElementById('llm').checked,session:SID})});
@@ -87,9 +91,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html")
         elif self.path == "/health":
-            r = _BOT.r
-            self._send(200, json.dumps({"ok": _BOT.available, "chunks": len(r._meta) if r._meta else 0,
-                                        "model": r._embed_model_name or "키워드",
+            st = _BOT.r.status()
+            self._send(200, json.dumps({"ok": st["available"], "chunks": st["chunks"],
+                                        "model": st["embed_model"] or "키워드",
+                                        "search": st["mode"],
+                                        "vector_rows": st["vector_rows"],
                                         "llm": "상시" if _BOT._client is not None else "off"}))
         else:
             self._send(404, "{}")
@@ -135,8 +141,8 @@ def main():
     if not _BOT.available:
         print("⚠️ RAG DB(rag_knowledge.duckdb) 미연결 — RAG_DB_PATH 확인", flush=True)
     else:
-        _BOT.r._ensure_cache()
-        print(f"✅ RAG 준비: 청크 {len(_BOT.r._meta)}, 임베더 {_BOT.r._embed_model_name}", flush=True)
+        st = _BOT.r.status()
+        print(f"✅ RAG 준비: 청크 {st['chunks']}, 검색 {st['mode']}, 임베더 {st['embed_model']}", flush=True)
     if not args.fast:
         print("LLM(Qwen) 사전로딩 + 워밍업…", flush=True)
         t = time.time()

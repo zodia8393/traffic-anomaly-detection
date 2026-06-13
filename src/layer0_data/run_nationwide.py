@@ -114,12 +114,13 @@ def _get_shared_detector():
     return _shared_detector
 
 
-def _create_vision_pipeline():
+def _create_vision_pipeline(camera_id: str = "nationwide"):
     """VisionPipeline 인스턴스 생성 (Detector 공유, Tracker/Trigger 개별)."""
     from tracker import VehicleTracker
     from layer1_vision.speed_estimator import SpeedEstimator
     from layer1_vision.trigger_detector import TriggerDetector
     from layer1_vision.vision_pipeline import VisionPipeline
+    from layer1_vision.anomaly_shadow import build_shadow_anomaly_engine
 
     class DummyClassifier:
         """사고 감지에서는 차종 분류 불필요."""
@@ -133,6 +134,7 @@ def _create_vision_pipeline():
         speed_est=SpeedEstimator(),
         trigger_det=TriggerDetector(),
         fps=float(STREAM_SAMPLE_FPS),
+        anomaly_engine=build_shadow_anomaly_engine(camera_id),
     )
 
 
@@ -823,7 +825,7 @@ class NationwidePipeline:
                 return None
 
             try:
-                pipeline = _create_vision_pipeline()
+                pipeline = _create_vision_pipeline(cctv_id)
             except Exception as e:
                 logger.error(
                     "VisionPipeline 생성 실패 [%s]: %s", cctv_id[:20], e,

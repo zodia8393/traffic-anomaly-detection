@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-YOLO_MODEL = "/workspace/prj_cctv/사고분석_설계/src/yolov8n.pt"
+YOLO_MODEL = "/workspace/prj/cctv/사고분석_설계/src/yolov8n.pt"
 VEHICLE_CLS = {2, 3, 5, 7}   # car, motorcycle, bus, truck
 PERSON_CLS = 0
 EMA_ALPHA = 0.6              # bbox 평활 계수 (깜빡임/지터 제거)

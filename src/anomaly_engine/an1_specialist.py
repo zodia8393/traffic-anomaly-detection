@@ -22,7 +22,7 @@ except ImportError:
     from turn_signal_detector import blink_score
 
 logger = logging.getLogger(__name__)
-DEFAULT = Path("/workspace/prj_cctv/사고분석_설계/models/an1_specialist.pkl")
+DEFAULT = Path("/workspace/prj/cctv/사고분석_설계/models/an1_specialist.pkl")
 LANE_CHANGE_LAT = 0.05  # 차선변경 판정 횡이동 임계 (특화모델 발동 조건)
 
 

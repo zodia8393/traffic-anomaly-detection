@@ -101,6 +101,31 @@ ANOMALY_CAMERA_CONFIGS = NEW_ROOT / "configs" / "cameras"
 ANOMALY_ALERT_THRESHOLD = 0.3
 ANOMALY_ALARM_THRESHOLD = 0.7
 
+# Shadow mode: 운영 녹화/MLLM 트리거는 기존 TriggerDetector 경로를 유지하고,
+# AnomalyEngine 점수와 규칙 위반만 JSONL로 수집한다. 실알림 전환은 별도 검증 후 활성화.
+ENABLE_ANOMALY_SHADOW = os.environ.get("ENABLE_ANOMALY_SHADOW", "1") == "1"
+ANOMALY_SHADOW_LOG_DIR = Path(os.environ.get(
+    "ANOMALY_SHADOW_LOG_DIR", str(NEW_ROOT / "output" / "anomaly_shadow"),
+))
+ANOMALY_SHADOW_MIN_SCORE = float(os.environ.get("ANOMALY_SHADOW_MIN_SCORE", "0.30"))
+ANOMALY_PROMOTE_TO_TRIGGER = os.environ.get("ANOMALY_PROMOTE_TO_TRIGGER", "0") == "1"
+ANOMALY_PROMOTE_MIN_STREAK = int(os.environ.get("ANOMALY_PROMOTE_MIN_STREAK", "3"))
+ANOMALY_PROMOTE_COOLDOWN_SEC = float(os.environ.get("ANOMALY_PROMOTE_COOLDOWN_SEC", "60"))
+ANOMALY_PROMOTE_MIN_SCORE = float(os.environ.get("ANOMALY_PROMOTE_MIN_SCORE", "0.85"))
+ANOMALY_ALLOW_ML_ONLY_PROMOTION = os.environ.get("ANOMALY_ALLOW_ML_ONLY_PROMOTION", "0") == "1"
+
+# an1 특화모델은 차선변경+깜빡이 후보가 명확할 때만 점수 반영한다.
+AN1_MIN_TRACK_POINTS = int(os.environ.get("AN1_MIN_TRACK_POINTS", "8"))
+AN1_MIN_LATERAL_TOTAL = float(os.environ.get("AN1_MIN_LATERAL_TOTAL", "0.08"))
+AN1_MIN_AMBER_HISTORY = int(os.environ.get("AN1_MIN_AMBER_HISTORY", "12"))
+AN1_SCORE_COOLDOWN_SEC = float(os.environ.get("AN1_SCORE_COOLDOWN_SEC", "20"))
+AN1_EMA_ALPHA = float(os.environ.get("AN1_EMA_ALPHA", "0.45"))
+AN1_SCORE_ON_THRESHOLD = float(os.environ.get("AN1_SCORE_ON_THRESHOLD", "0.75"))
+
+# T8 보행자 감지는 차량 경로와 분리한다. ROI 확정 전 운영 기본값은 shadow/비활성이다.
+ENABLE_T8_PEDESTRIAN = os.environ.get("ENABLE_T8_PEDESTRIAN", "0") == "1"
+T8_PEDESTRIAN_CONF = float(os.environ.get("T8_PEDESTRIAN_CONF", "0.25"))
+
 # ── ML 앙상블 활성화 게이트 (Level 2~4 + 지도감지기) ───────────────────
 # 미검증/저성능 모델이 사고판정을 오염시키지 않도록 전제조건 통과 모델만 투표.
 ENABLE_ML_ENSEMBLE = True            # 지도감지기(AUROC 0.918) 통과로 활성화

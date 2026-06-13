@@ -7,7 +7,7 @@
 실행:
   python check_incidents_in_recording.py
   python check_incidents_in_recording.py --radius 3   # 매칭 반경 3km
-  python check_incidents_in_recording.py --config /tmp/cameras_5routes.json
+  python check_incidents_in_recording.py --config cameras_5.json
 """
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from track3_api_incident import ITSIncidentClient
 
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "cameras_5.json"
+
 
 def haversine_km(lon1, lat1, lon2, lat2):
     R = 6371.0
@@ -35,13 +37,27 @@ def haversine_km(lon1, lat1, lon2, lat2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def normalize_camera_config(cameras: list[dict]) -> list[dict]:
+    normalized = []
+    for i, cam in enumerate(cameras, 1):
+        item = dict(cam)
+        item["name"] = cam.get("name") or cam.get("cctv_name") or cam.get("slug") or f"camera_{i}"
+        item["x"] = cam.get("x") or cam.get("coordx") or cam.get("lon") or cam.get("lng")
+        item["y"] = cam.get("y") or cam.get("coordy") or cam.get("lat")
+        item["route"] = cam.get("route") or cam.get("cctv_road") or cam.get("hotspot_road") or ""
+        if item["x"] is None or item["y"] is None:
+            raise ValueError(f"camera {i} has no x/y or coordx/coordy")
+        normalized.append(item)
+    return normalized
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="/tmp/cameras_5routes.json")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG))
     ap.add_argument("--radius", type=float, default=5.0, help="매칭 반경(km)")
     args = ap.parse_args()
 
-    cams = json.loads(Path(args.config).read_text())
+    cams = normalize_camera_config(json.loads(Path(args.config).read_text()))
     print(f"=== ITS 돌발정보 × 녹화 CCTV 사고 체크 ({datetime.now():%Y-%m-%d %H:%M}) ===")
     print(f"녹화 카메라 {len(cams)}대, 매칭 반경 {args.radius}km\n")
 

@@ -163,7 +163,8 @@ class ITSIncidentClient:
                 # 쿼터/레이트(429) 또는 서버오류(5xx) → 백오프 재시도
                 if resp.status_code == 429 or resp.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {resp.status_code}")
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    raise requests.HTTPError(f"HTTP {resp.status_code}")
                 payload = resp.json()
                 code = payload.get("header", {}).get("resultCode", -1)
                 if code in _QUOTA_CODES:
@@ -180,12 +181,13 @@ class ITSIncidentClient:
                 break
             except Exception as e:  # noqa: BLE001 — 네트워크/HTTP/파싱 모두
                 backoff = min(_API_BACKOFF_BASE * (2 ** attempt), _API_BACKOFF_MAX)
+                err = str(e) if str(e).startswith("HTTP ") else type(e).__name__
                 if attempt < _API_MAX_RETRIES - 1:
                     logger.warning("ITS API 실패(%d/%d): %s — %.0f초 후 재시도",
-                                   attempt + 1, _API_MAX_RETRIES, e, backoff)
+                                   attempt + 1, _API_MAX_RETRIES, err, backoff)
                     time.sleep(backoff)
                 else:
-                    logger.error("ITS 돌발상황 API 최종 실패: %s", e)
+                    logger.error("ITS 돌발상황 API 최종 실패: %s", err)
                     self._record_failure()
                     return False, []
 

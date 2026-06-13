@@ -18,12 +18,14 @@ import logging
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 import requests
 from dotenv import load_dotenv
 
@@ -42,9 +44,23 @@ WARN_DISK_GB = 60  # 이 미만이면 경고만
 
 ITS_API_KEY = os.getenv("ITS_API_KEY", "")
 ITS_CCTV_URL = "https://openapi.its.go.kr:9443/cctvInfo"
+ITS_WEB_BASE = "https://www.its.go.kr"
 URL_REFRESH_SEC = 5400  # 90분마다 URL 갱신
+CAMERA_RESTART_BASE_SEC = 15
+CAMERA_RESTART_MAX_SEC = 300
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "cameras_5.json"
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) CCTVRecorder/1.0",
+    "Accept": "*/*",
+}
+FFMPEG_BIN = os.getenv("FFMPEG_BIN") or shutil.which("ffmpeg") or "/home/ybs/.local/bin/ffmpeg"
+FFPROBE_BIN = os.getenv("FFPROBE_BIN") or shutil.which("ffprobe") or "/home/ybs/.local/bin/ffprobe"
 
 _running = True
+_WEB_SESSION: requests.Session | None = None
+_WEB_MARKER_CACHE = {"loaded_at": 0.0, "items": []}
+_WEB_CACHE_LOCK = threading.RLock()
+_OPENAPI_DISABLED_UNTIL = 0.0
 
 
 def _signal_handler(sig, frame):
@@ -76,7 +92,7 @@ def convert_to_mp4(ts_path: Path, delete_ts: bool = True):
     logger.info("MP4 변환 시작: %s", ts_path.name)
     try:
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(ts_path), "-c", "copy", str(mp4_path)],
+            [FFMPEG_BIN, "-y", "-i", str(ts_path), "-c", "copy", str(mp4_path)],
             capture_output=True, text=True, timeout=1800,
         )
         if result.returncode == 0 and mp4_path.exists():
@@ -96,45 +112,223 @@ def convert_to_mp4(ts_path: Path, delete_ts: bool = True):
         logger.warning("MP4 변환 에러: %s — %s", ts_path.name, e)
 
 
+def _cctv_type_candidates(cam: dict) -> list[str]:
+    candidates = []
+    for value in ("1", cam.get("cctvtype"), "4"):
+        if value is None:
+            continue
+        value = str(value)
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
+def _pick_cctv_url(items: list[dict], cam_name: str) -> str:
+    clean_name = cam_name.replace("[", "").replace("]", "").replace(" ", "")
+    for item in items:
+        item_clean = item.get("cctvname", "").replace("[", "").replace("]", "").replace(" ", "")
+        if clean_name and clean_name in item_clean:
+            return item.get("cctvurl", "")
+    return items[0].get("cctvurl", "")
+
+
+def _meta_content(html: str, name: str) -> str | None:
+    match = re.search(
+        r'<meta[^>]+name=["\']' + re.escape(name) + r'["\'][^>]*content=["\']([^"\']+)',
+        html,
+    )
+    return match.group(1) if match else None
+
+
+def _its_web_session() -> requests.Session:
+    global _WEB_SESSION
+    if _WEB_SESSION is not None:
+        return _WEB_SESSION
+
+    session = requests.Session()
+    session.headers.update({
+        **HTTP_HEADERS,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": ITS_WEB_BASE,
+        "Referer": ITS_WEB_BASE + "/",
+    })
+    try:
+        home = session.get(ITS_WEB_BASE + "/", timeout=30)
+        header = _meta_content(home.text, "_csrf_header")
+        token = _meta_content(home.text, "_csrf")
+        if header and token:
+            session.headers.update({header: token})
+    except requests.RequestException as e:
+        logger.warning("ITS 웹 세션 초기화 실패: %s", type(e).__name__)
+    _WEB_SESSION = session
+    return session
+
+
+def _reset_its_web_session() -> None:
+    global _WEB_SESSION
+    with _WEB_CACHE_LOCK:
+        if _WEB_SESSION is not None:
+            try:
+                _WEB_SESSION.close()
+            except Exception:
+                pass
+        _WEB_SESSION = None
+        _WEB_MARKER_CACHE["loaded_at"] = 0.0
+        _WEB_MARKER_CACHE["items"] = []
+
+
+def _load_its_web_cctvs(force: bool = False) -> list[dict]:
+    now = time.time()
+    with _WEB_CACHE_LOCK:
+        if not force and _WEB_MARKER_CACHE["items"] and now - _WEB_MARKER_CACHE["loaded_at"] < 3600:
+            return list(_WEB_MARKER_CACHE["items"])
+
+        session = _its_web_session()
+        payload = {"body": {"data": {"type": "CCTV"}}}
+        try:
+            resp = session.post(ITS_WEB_BASE + "/map/getMarkers", data=json.dumps(payload), timeout=40)
+        except requests.RequestException as e:
+            logger.warning("ITS 웹 CCTV 마커 조회 실패: %s", type(e).__name__)
+            _reset_its_web_session()
+            return []
+        if resp.status_code != 200:
+            logger.warning("ITS 웹 CCTV 마커 조회 실패: HTTP %s", resp.status_code)
+            if resp.status_code in (401, 403, 429, 500, 502, 503, 504):
+                _reset_its_web_session()
+            return []
+
+        infos = []
+        try:
+            features = resp.json().get("features", [])
+        except ValueError:
+            logger.warning("ITS 웹 CCTV 마커 응답 JSON 해석 실패")
+            return []
+        for feature in features:
+            raw = (feature.get("properties") or {}).get("INFO")
+            try:
+                info = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            if isinstance(info, dict) and info.get("x") and info.get("y"):
+                infos.append(info)
+
+        _WEB_MARKER_CACHE["loaded_at"] = now
+        _WEB_MARKER_CACHE["items"] = infos
+        logger.info("ITS 웹 CCTV 마커 조회 완료: %d건", len(infos))
+        return list(infos)
+
+
+def _camera_match_score(cam: dict, info: dict) -> tuple[int, int, float]:
+    cam_name = cam.get("name", "").replace("[", "").replace("]", "").replace(" ", "")
+    info_name = str(info.get("instlLcDc", "")).replace("[", "").replace("]", "").replace(" ", "")
+    route = str(cam.get("route", "")).replace(" ", "")
+    info_route = (str(info.get("instlLcDc", "")) + str(info.get("detailDc", ""))).replace(" ", "")
+    try:
+        dx = float(info.get("x")) - float(cam.get("x"))
+        dy = float(info.get("y")) - float(cam.get("y"))
+        dist2 = dx * dx + dy * dy
+    except Exception:
+        dist2 = 999.0
+    name_penalty = 0 if cam_name and cam_name in info_name else 1
+    route_penalty = 0 if route and route in info_route else 1
+    return name_penalty, route_penalty, dist2
+
+
+def refresh_cctv_url_from_web(cam: dict) -> str | None:
+    """ITS 웹 지도 경로로 현재 HLS URL을 조회한다. OpenAPI 키 장애 시 폴백."""
+    try:
+        items = _load_its_web_cctvs()
+    except Exception as e:
+        logger.warning("ITS 웹 CCTV 마커 조회 예외: %s", type(e).__name__)
+        _reset_its_web_session()
+        return None
+    if not items:
+        return None
+
+    session = _its_web_session()
+    for info in sorted(items, key=lambda item: _camera_match_score(cam, item))[:5]:
+        source_url = info.get("appUrl") or info.get("webUrl") or ""
+        if not source_url:
+            continue
+        if source_url.startswith("http://"):
+            source_url = "https://" + source_url[len("http://"):]
+        target_url = source_url if source_url.endswith("!hls") else source_url + "!hls"
+
+        try:
+            resp = session.post(
+                ITS_WEB_BASE + "/api/cctv/hls",
+                data=json.dumps({"targetUrl": target_url}),
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                logger.warning("ITS 웹 HLS 조회 실패: HTTP %s", resp.status_code)
+                continue
+            payload = resp.json()
+            stream_url = payload.get("streamUrl") if isinstance(payload, dict) else str(payload)
+        except Exception as e:
+            logger.warning("ITS 웹 HLS 조회 실패: %s", type(e).__name__)
+            if isinstance(e, requests.RequestException):
+                _reset_its_web_session()
+            continue
+
+        if stream_url and resolve_media_playlist(stream_url):
+            logger.info("ITS 웹 HLS URL 선택: %s", info.get("instlLcDc", cam.get("name", "")))
+            return stream_url
+    return None
+
+
 def refresh_cctv_url(cam: dict) -> str | None:
     """ITS API로 카메라 인근 CCTV URL을 갱신."""
-    if not ITS_API_KEY:
-        return None
-    x, y = cam.get("x", 0), cam.get("y", 0)
-    if not x or not y:
-        return None
-    delta = 0.05  # ~5km 범위 (좁으면 대상 CCTV 누락 가능)
-    params = {
-        "apiKey": ITS_API_KEY,
-        "type": "ex",
-        "cctvType": "1",
-        "minX": str(x - delta), "maxX": str(x + delta),
-        "minY": str(y - delta), "maxY": str(y + delta),
-        "getType": "json",
-    }
-    try:
-        resp = requests.get(ITS_CCTV_URL, params=params, timeout=30)
-        data = resp.json()
-        items = data.get("response", {}).get("data", [])
-        if items:
-            # 이름이 가장 비슷한 CCTV 선택
-            cam_name = cam.get("name", "")
-            clean_name = cam_name.replace("[", "").replace("]", "").replace(" ", "")
-            for item in items:
-                item_clean = item.get("cctvname", "").replace("[", "").replace("]", "").replace(" ", "")
-                if clean_name in item_clean:
-                    return item.get("cctvurl", "")
-            # 못 찾으면 첫 번째 반환
-            return items[0].get("cctvurl", "")
-    except Exception as e:
-        logger.warning("ITS URL 갱신 실패: %s", e)
-    return None
+    global _OPENAPI_DISABLED_UNTIL
+    x, y = float(cam.get("x") or 0), float(cam.get("y") or 0)
+    if ITS_API_KEY and x and y and time.time() >= _OPENAPI_DISABLED_UNTIL:
+        delta = 0.05  # ~5km 범위 (좁으면 대상 CCTV 누락 가능)
+
+        for cctv_type in _cctv_type_candidates(cam):
+            params = {
+                "apiKey": ITS_API_KEY,
+                "type": "ex",
+                "cctvType": cctv_type,
+                "minX": str(x - delta), "maxX": str(x + delta),
+                "minY": str(y - delta), "maxY": str(y + delta),
+                "getType": "json",
+            }
+            try:
+                resp = requests.get(ITS_CCTV_URL, params=params, headers=HTTP_HEADERS, timeout=30)
+                if resp.status_code != 200:
+                    logger.warning("ITS URL 갱신 HTTP %s(cctvType=%s)", resp.status_code, cctv_type)
+                    if resp.status_code == 401:
+                        _OPENAPI_DISABLED_UNTIL = time.time() + 3600
+                        logger.warning("ITS OpenAPI 인증 실패 — 1시간 동안 웹 지도 폴백 우선 사용")
+                        break
+                    continue
+                data = resp.json()
+                items = data.get("response", {}).get("data", [])
+            except Exception as e:
+                logger.warning("ITS URL 갱신 실패(cctvType=%s): %s", cctv_type, type(e).__name__)
+                continue
+
+            if not items:
+                logger.warning("ITS URL 후보 없음(cctvType=%s)", cctv_type)
+                continue
+
+            url = _pick_cctv_url(items, cam.get("name", ""))
+            if not url:
+                continue
+            if resolve_media_playlist(url):
+                logger.info("ITS URL 갱신 후보 선택(cctvType=%s, count=%d)", cctv_type, len(items))
+                return url
+            logger.warning("ITS URL 후보 해석 실패(cctvType=%s), 다음 후보 시도", cctv_type)
+
+    return refresh_cctv_url_from_web(cam)
 
 
 def resolve_media_playlist(hls_url: str) -> tuple[str, str] | None:
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "verbose", "-i", hls_url,
+            [FFPROBE_BIN, "-v", "verbose", "-i", hls_url,
              "-show_entries", "format=duration", "-of", "csv=p=0"],
             capture_output=True, text=True, timeout=15,
         )
@@ -147,6 +341,25 @@ def resolve_media_playlist(hls_url: str) -> tuple[str, str] | None:
                     return media_url, base_url
     except Exception as e:
         logger.warning("ffprobe 실패: %s", e)
+
+    try:
+        resp = requests.get(hls_url, headers=HTTP_HEADERS, timeout=10)
+        if resp.status_code != 200 or "#EXTM3U" not in resp.text:
+            return None
+        lines = [line.strip() for line in resp.text.splitlines()
+                 if line.strip() and not line.startswith("#")]
+        if not lines:
+            return None
+        nested = [line for line in lines if ".m3u8" in line]
+        if nested:
+            preferred = next((line for line in nested if "main_stream" in line), nested[0])
+            media_url = urljoin(hls_url, preferred)
+            base_url = media_url.rsplit("/", 1)[0] + "/"
+            return media_url, base_url
+        base_url = hls_url.rsplit("/", 1)[0] + "/"
+        return hls_url, base_url
+    except Exception as e:
+        logger.warning("HLS playlist 직접 해석 실패: %s", e)
     return None
 
 
@@ -197,7 +410,13 @@ def _record_one_file(cam_idx: int, slug: str, hls_url_ref: list,
                 if error_count > 10:
                     # URL 만료 가능성 → ITS API로 갱신 시도
                     logger.info("[%d] %s: URL 갱신 시도 (연속 실패 %d회)", cam_idx, slug, error_count)
-                    new_url = refresh_cctv_url(cam_config)
+                    try:
+                        new_url = refresh_cctv_url(cam_config)
+                    except Exception as e:
+                        logger.warning("[%d] %s: URL 갱신 예외: %s",
+                                       cam_idx, slug, type(e).__name__)
+                        _reset_its_web_session()
+                        new_url = None
                     if new_url:
                         hls_url_ref[0] = new_url
                         last_url_refresh = time.time()
@@ -232,7 +451,7 @@ def _record_one_file(cam_idx: int, slug: str, hls_url_ref: list,
                         seg_key = seg_name.split("?")[0]
                         if seg_key in downloaded:
                             continue
-                        seg_url = base_url + seg_name
+                        seg_url = urljoin(base_url, seg_name)
                         try:
                             sr = session.get(seg_url, timeout=10)
                             if sr.status_code == 200:
@@ -261,7 +480,13 @@ def _record_one_file(cam_idx: int, slug: str, hls_url_ref: list,
             # 주기적 URL 갱신 (90분마다)
             if time.time() - last_url_refresh > URL_REFRESH_SEC:
                 logger.info("[%d] %s: 주기적 URL 갱신 중...", cam_idx, slug)
-                new_url = refresh_cctv_url(cam_config)
+                try:
+                    new_url = refresh_cctv_url(cam_config)
+                except Exception as e:
+                    logger.warning("[%d] %s: 주기적 URL 갱신 예외: %s",
+                                   cam_idx, slug, type(e).__name__)
+                    _reset_its_web_session()
+                    new_url = None
                 if new_url:
                     hls_url_ref[0] = new_url
                     downloaded.clear()
@@ -291,14 +516,22 @@ def record_camera(cam_idx: int, cam_config: dict, hls_url: str,
     hls_url_ref = [hls_url]  # mutable reference for URL refresh
 
     session = requests.Session()
+    session.headers.update(HTTP_HEADERS)
     all_files = []
     convert_threads: list[threading.Thread] = []
+    restart_delay = CAMERA_RESTART_BASE_SEC
 
     # 시작 전 URL 유효성 확인, 실패 시 즉시 갱신 시도
     resolved = resolve_media_playlist(hls_url_ref[0])
     if not resolved:
         logger.warning("[%d] %s: 초기 URL 무효, ITS API로 갱신 시도", cam_idx, slug)
-        new_url = refresh_cctv_url(cam_config)
+        try:
+            new_url = refresh_cctv_url(cam_config)
+        except Exception as e:
+            logger.warning("[%d] %s: 초기 URL 갱신 예외: %s",
+                           cam_idx, slug, type(e).__name__)
+            _reset_its_web_session()
+            new_url = None
         if new_url:
             hls_url_ref[0] = new_url
             logger.info("[%d] %s: URL 갱신 성공", cam_idx, slug)
@@ -325,9 +558,32 @@ def record_camera(cam_idx: int, cam_config: dict, hls_url: str,
         else:
             rec_sec = duration_sec
 
-        file_result = _record_one_file(
-            cam_idx, slug, hls_url_ref, cam_config, out_file, rec_sec, session,
-        )
+        try:
+            file_result = _record_one_file(
+                cam_idx, slug, hls_url_ref, cam_config, out_file, rec_sec, session,
+            )
+            restart_delay = CAMERA_RESTART_BASE_SEC
+        except Exception:
+            logger.exception(
+                "[%d] %s: 카메라 작업 예외, %.0f초 후 새 세션으로 재시작",
+                cam_idx, slug, restart_delay,
+            )
+            if out_file.exists() and out_file.stat().st_size > 0:
+                ct = threading.Thread(target=convert_to_mp4, args=(out_file,))
+                ct.start()
+                convert_threads.append(ct)
+                convert_threads = [t for t in convert_threads if t.is_alive()]
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = requests.Session()
+            session.headers.update(HTTP_HEADERS)
+            if not continuous:
+                break
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay * 2, CAMERA_RESTART_MAX_SEC)
+            continue
         file_result["name"] = cam_name
         all_files.append(file_result)
 
@@ -381,6 +637,22 @@ def parse_duration(s: str) -> float:
     return float(s)
 
 
+def normalize_camera_config(cameras: list[dict]) -> list[dict]:
+    """Accept both legacy name/url and ITS cctv_name/cctvurl camera JSON."""
+    normalized = []
+    for i, cam in enumerate(cameras, 1):
+        item = dict(cam)
+        item.setdefault("name", cam.get("cctv_name") or cam.get("slug") or f"camera_{i}")
+        item.setdefault("url", cam.get("cctvurl") or cam.get("hls_url") or "")
+        item.setdefault("route", cam.get("cctv_road") or cam.get("hotspot_road") or "")
+        item.setdefault("x", cam.get("coordx") or cam.get("lon") or cam.get("lng") or 0)
+        item.setdefault("y", cam.get("coordy") or cam.get("lat") or 0)
+        if not item["url"]:
+            raise ValueError(f"camera {i} has no url/cctvurl")
+        normalized.append(item)
+    return normalized
+
+
 def main():
     parser = argparse.ArgumentParser(description="다중 CCTV HLS 직접 다운로드 동시 녹화")
     parser.add_argument("--config", type=str, help="카메라 JSON 파일")
@@ -398,13 +670,13 @@ def main():
         logger.error("--continuous와 --duration은 동시 사용 불가")
         sys.exit(1)
 
-    config_path = args.config or "/tmp/cameras_5routes.json"
+    config_path = args.config or str(DEFAULT_CONFIG)
     if not Path(config_path).exists():
         logger.error("카메라 설정 파일 없음: %s", config_path)
         sys.exit(1)
 
     with open(config_path) as f:
-        cameras = json.load(f)
+        cameras = normalize_camera_config(json.load(f))
 
     duration_sec = 300 if args.test else parse_duration(args.duration)
     rotation_sec = parse_duration(args.rotation)

@@ -137,6 +137,7 @@ class MultiCCTVPipeline:
         from layer1_vision.speed_estimator import SpeedEstimator
         from layer1_vision.trigger_detector import TriggerDetector
         from layer1_vision.vision_pipeline import VisionPipeline
+        from layer1_vision.anomaly_shadow import build_shadow_anomaly_engine
 
         class DummyClassifier:
             def predict_batch(self, crops):
@@ -151,6 +152,7 @@ class MultiCCTVPipeline:
                 speed_est=SpeedEstimator(),
                 trigger_det=TriggerDetector(),
                 fps=float(SAMPLE_FPS),
+                anomaly_engine=build_shadow_anomaly_engine(f"multi_{i + 1}"),
             )
             pipelines.append(pipeline)
             logger.info("  Vision Pipeline %d/%d 준비", i + 1, count)
@@ -317,4 +319,3 @@ class MultiCCTVPipeline:
 # ═══════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════
-

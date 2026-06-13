@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("watchdog")
 
 HERE = Path(__file__).resolve().parent
-CONFIG = "/tmp/cameras_5routes.json"
+CONFIG = str(HERE / "cameras_5.json")
 REC_LOG = "/DATA/cctv_recording/record_continuous.log"
 STATUS = Path("/DATA/cctv_recording/watchdog_status.json")
 REC_ROOT = Path("/DATA/cctv_recording")
@@ -94,39 +94,85 @@ def write_status(running: bool, pid, free_gb: float, disk_state: str, action: st
         logger.warning("상태 기록 실패: %s", e)
 
 
+def _camera_slug(cam: dict, index: int) -> str:
+    name = cam.get("name") or cam.get("cctv_name") or cam.get("slug") or f"camera_{index}"
+    return str(name).replace("[", "").replace("]", "").replace(" ", "_")
+
+
+def _expected_cameras() -> list[str]:
+    """녹화 설정 기준 카메라 slug 목록."""
+    try:
+        with open(CONFIG) as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning("카메라 설정 형식 비정상: %s", CONFIG)
+            return []
+        return [_camera_slug(cam, i + 1) for i, cam in enumerate(data)]
+    except Exception as e:
+        logger.warning("카메라 설정 읽기 실패: %s", e)
+        return []
+
+
 def check_cameras() -> list[str]:
-    """오늘 날짜 디렉토리의 활성 .ts가 갱신 멈춘 카메라(비활성) 목록 반환."""
+    """설정된 카메라 중 오늘 활성 .ts 갱신이 멈춘 카메라 목록 반환."""
     import time
     today = datetime.now().strftime("%Y%m%d")
     day_dir = REC_ROOT / today
-    if not day_dir.exists():
-        return []
     stale = []
     now = time.time()
-    for cam_dir in day_dir.glob("*_hls"):
+
+    expected = _expected_cameras()
+    if expected:
+        if not day_dir.exists():
+            return [f"{slug}(오늘 디렉토리 없음)" for slug in expected]
+        cam_dirs = [(slug, day_dir / f"{slug}_hls") for slug in expected]
+    else:
+        if not day_dir.exists():
+            return []
+        cam_dirs = [(cam_dir.name.replace("_hls", ""), cam_dir)
+                    for cam_dir in day_dir.glob("*_hls")]
+
+    for slug, cam_dir in cam_dirs:
+        if not cam_dir.exists():
+            stale.append(f"{slug}(디렉토리 없음)")
+            continue
         ts_files = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)
         if not ts_files:
-            stale.append(cam_dir.name.replace("_hls", "") + "(파일없음)")
+            stale.append(f"{slug}(파일없음)")
             continue
         latest = ts_files[-1]
         if now - latest.stat().st_mtime > CAMERA_STALE_SEC:
             mins = (now - latest.stat().st_mtime) / 60
-            stale.append(f"{cam_dir.name.replace('_hls','')}({mins:.0f}분 미갱신)")
+            stale.append(f"{slug}({mins:.0f}분 미갱신)")
     return stale
 
 
 def _count_active_cameras() -> tuple[int, int, float]:
-    """(전체 카메라 수, 활성 카메라 수, 오늘 누적 바이트)."""
+    """(설정 기준 전체 카메라 수, 활성 카메라 수, 오늘 누적 바이트)."""
     import time
     today = datetime.now().strftime("%Y%m%d")
     day_dir = REC_ROOT / today
-    if not day_dir.exists():
-        return 0, 0, 0.0
     now = time.time()
-    total = active = 0
     day_bytes = 0
-    for cam_dir in day_dir.glob("*_hls"):
-        total += 1
+
+    expected = _expected_cameras()
+    if expected:
+        total = len(expected)
+        active = 0
+        if not day_dir.exists():
+            return total, active, 0.0
+        cam_dirs = [day_dir / f"{slug}_hls" for slug in expected]
+    else:
+        if not day_dir.exists():
+            return 0, 0, 0.0
+        total = active = 0
+        cam_dirs = list(day_dir.glob("*_hls"))
+
+    for cam_dir in cam_dirs:
+        if not expected:
+            total += 1
+        if not cam_dir.exists():
+            continue
         files = list(cam_dir.glob("*.ts")) + list(cam_dir.glob("*.mp4"))
         day_bytes += sum(f.stat().st_size for f in files)
         ts = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)

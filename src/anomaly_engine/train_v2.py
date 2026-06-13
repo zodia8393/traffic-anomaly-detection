@@ -8,7 +8,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 
-MODEL_DIR = Path("/workspace/prj_cctv/사고분석_설계/models")
+MODEL_DIR = Path("/workspace/prj/cctv/사고분석_설계/models")
 d = np.load(MODEL_DIR / "dataset_v2.npz", allow_pickle=True)
 X, y, types, fnames = d["X"], d["y"], list(d["types"]), list(d["feature_names"])
 print(f"클립 {len(X)} (비정상 {int(y.sum())}/정상 {int((y==0).sum())}), 특징 {X.shape[1]}개")

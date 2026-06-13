@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-YOLO_MODEL = "/workspace/prj_cctv/사고분석_설계/src/yolov8n.pt"
+YOLO_MODEL = "/workspace/prj/cctv/사고분석_설계/src/yolov8n.pt"
 VEHICLE_CLS = {2: "승용차", 3: "이륜차", 5: "버스", 7: "화물차"}
 IMGSZ = 736
 MIN_TRACK_FRAMES = 4       # 이보다 짧은 트랙은 스푸리어스 후보(검증로그 남김)

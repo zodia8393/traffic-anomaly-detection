@@ -94,6 +94,7 @@ class RealtimeAccidentPipeline:
         from layer1_vision.speed_estimator import SpeedEstimator
         from layer1_vision.trigger_detector import TriggerDetector
         from layer1_vision.vision_pipeline import VisionPipeline
+        from layer1_vision.anomaly_shadow import build_shadow_anomaly_engine
 
         class DummyClassifier:
             """사고 감지에서는 차종 분류 불필요."""
@@ -109,6 +110,9 @@ class RealtimeAccidentPipeline:
             speed_est=SpeedEstimator(),
             trigger_det=TriggerDetector(),
             fps=float(SAMPLE_FPS),
+            anomaly_engine=build_shadow_anomaly_engine(
+                self.target_cctv.cctv_id if self.target_cctv else "realtime"
+            ),
         )
         return pipeline
 
@@ -702,5 +706,4 @@ class RealtimeAccidentPipeline:
         free_tb = usage.free / 1e12
         print(f"\n  디스크: {free_tb:.2f} TB 여유")
         print("=" * 60)
-
 

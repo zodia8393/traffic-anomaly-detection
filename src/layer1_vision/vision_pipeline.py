@@ -20,7 +20,19 @@ import json
 import cv2
 import numpy as np
 
-from config_new import VEHICLE_13CLASS, L1_KEYFRAMES, L1_PACKAGES
+from config_new import (
+    AN1_EMA_ALPHA,
+    AN1_MIN_AMBER_HISTORY,
+    AN1_MIN_LATERAL_TOTAL,
+    AN1_MIN_TRACK_POINTS,
+    AN1_SCORE_COOLDOWN_SEC,
+    AN1_SCORE_ON_THRESHOLD,
+    ENABLE_T8_PEDESTRIAN,
+    T8_PEDESTRIAN_CONF,
+    VEHICLE_13CLASS,
+    L1_KEYFRAMES,
+    L1_PACKAGES,
+)
 from .keyframe_selector import select_keyframes
 from .speed_estimator import SpeedEstimator
 from .trigger_detector import TriggerDetector, TriggerEvent
@@ -53,6 +65,8 @@ class VisionPipeline:
         fps: float = 1.0,
         anomaly_engine: AnomalyEngine | None = None,
         traffic_counter: Any = None,
+        enable_pedestrian_t8: bool | None = None,
+        pedestrian_roi: Any = None,
     ) -> None:
         """컴포넌트 주입.
 
@@ -68,6 +82,9 @@ class VisionPipeline:
             anomaly_engine: AnomalyEngine 인스턴스 (선택적). None이면 이상징후 탐지 비활성.
             traffic_counter: CameraCounter 인스턴스 (선택적). None이면 교통량 계수 비활성
                 (기본값). 검출/추적 패스를 공유하므로 추가 추론 없이 계수만 덧붙는다.
+            enable_pedestrian_t8: person class를 차량과 분리해 T8 후보로 전달할지 여부.
+            pedestrian_roi: point_in_roi(x, y, "road")를 제공하는 ROI 객체. None이면
+                명시 활성화 테스트/진단에서만 전체 프레임 기준으로 처리한다.
         """
         self.detector = detector
         self.tracker = tracker
@@ -77,11 +94,15 @@ class VisionPipeline:
         self.fps = fps
         self.anomaly_engine = anomaly_engine
         self.traffic_counter = traffic_counter
+        self.enable_pedestrian_t8 = ENABLE_T8_PEDESTRIAN if enable_pedestrian_t8 is None else enable_pedestrian_t8
+        self.pedestrian_roi = pedestrian_roi
 
         # 지도 사고감지기 (STGAE 0.49 대체, AUROC 0.918) — 게이트 통과 시에만 활성
         self._traj_detector = None
         self._an1_specialist = None
         self._amber_history: dict[int, list[float]] = {}  # 차량별 깜빡이 강도(an1용)
+        self._an1_last_score_ts: dict[int, float] = {}
+        self._an1_score_ema: dict[int, float] = {}
         self._traj_score_interval = max(1, int(fps * 5))  # 5초마다 윈도우 채점
         try:
             from anomaly_engine.activation_gate import active_ml_models
@@ -136,11 +157,12 @@ class VisionPipeline:
 
         # 1. 검출
         raw_dets = self.detector.detect_frame(frame)
+        vehicle_dets, pedestrians = self._split_vehicle_and_pedestrian_detections(raw_dets)
 
         # 2. 트래커 입력 형식 변환
         det_dicts = [
             {"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "coco_cls": d[5]}
-            for d in raw_dets
+            for d in vehicle_dets
         ]
         tracked = self.tracker.update(det_dicts, timestamp, frame=frame)
 
@@ -239,6 +261,7 @@ class VisionPipeline:
         }
         triggers = self.trigger_det.update(
             frame_idx, timestamp, tracks_info, ttc_list, self._speed_history,
+            pedestrians=pedestrians if self.enable_pedestrian_t8 else None,
         )
 
         if triggers:
@@ -258,10 +281,10 @@ class VisionPipeline:
                     if sc is not None:
                         ml_scores = {"supervised_traj": sc}
                 # an1 특화: 차선변경 감지 시 차선변경 차량 깜빡이 체크
-                if self._an1_specialist is not None and self._an1_specialist.has_lane_change(norm):
-                    changer = self._lane_changer_id(norm)
-                    amber = self._amber_history.get(changer, [])
-                    a1 = self._an1_specialist.score(norm, amber)
+                if self._an1_specialist is not None:
+                    changer = self._an1_candidate_id(norm, timestamp)
+                    amber = self._amber_history.get(changer, []) if changer is not None else []
+                    a1 = self._score_an1_candidate(norm, changer, amber, timestamp)
                     if a1 is not None:
                         ml_scores = (ml_scores or {})
                         ml_scores["an1_specialist"] = a1
@@ -272,6 +295,7 @@ class VisionPipeline:
                     ttc_list=ttc_list,
                     dt=1.0 / self.fps if self.fps > 0 else 1.0,
                     ml_scores=ml_scores,
+                    frame_idx=frame_idx,
                 )
                 if anomaly_result.alert is not None:
                     logger.info(
@@ -312,6 +336,7 @@ class VisionPipeline:
             "frame_idx": frame_idx,
             "timestamp": timestamp,
             "detections": raw_dets,
+            "pedestrians": pedestrians,
             "tracked_vehicles": tracked_vehicles,
             "classifications": classifications,
             "triggers": triggers,
@@ -337,6 +362,95 @@ class VisionPipeline:
             if seq:
                 out[tid] = seq
         return out
+
+    def _split_vehicle_and_pedestrian_detections(self, detections: list[tuple]) -> tuple[list[tuple], list[dict[str, Any]]]:
+        """COCO person(0)을 차량 추적 입력에서 분리한다.
+
+        현재 운영 detector는 기본적으로 차량 class만 반환한다. 향후 `DET_INCLUDE_PERSON=1`
+        또는 테스트 fake detector가 person을 반환해도 ByteTrack 차량 경로와 카운팅이
+        오염되지 않도록 여기서 분리한다.
+        """
+        vehicles: list[tuple] = []
+        pedestrians: list[dict[str, Any]] = []
+        for d in detections:
+            cls_id = int(d[5])
+            if cls_id != 0:
+                vehicles.append(d)
+                continue
+            x1, y1, x2, y2, conf, _ = d
+            if float(conf) < T8_PEDESTRIAN_CONF:
+                continue
+            cx, cy = (float(x1) + float(x2)) / 2, (float(y1) + float(y2)) / 2
+            if self.pedestrian_roi is not None:
+                try:
+                    if not self.pedestrian_roi.point_in_roi(cx, cy, "road"):
+                        continue
+                except Exception:  # noqa: BLE001 — ROI 실패 시 T8 후보 제외
+                    continue
+            pedestrians.append({
+                "track_id": -1,
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "center": (cx, cy),
+                "conf": float(conf),
+                "coco_cls": cls_id,
+            })
+        return vehicles, pedestrians
+
+    def _an1_candidate_id(self, norm_tracks: dict[int, list], timestamp: float) -> int | None:
+        """an1 특화모델을 호출할 차선변경 후보를 고른다."""
+        lat_axis = self._lat_axis(norm_tracks)
+        best_id, best_lat = None, 0.0
+        for tid, pts in norm_tracks.items():
+            if len(pts) < AN1_MIN_TRACK_POINTS:
+                continue
+            lat = self._lateral_total(pts, lat_axis)
+            if lat > best_lat:
+                best_id, best_lat = tid, lat
+        if best_id is None or best_lat < AN1_MIN_LATERAL_TOTAL:
+            return None
+        last_ts = self._an1_last_score_ts.get(best_id)
+        if last_ts is not None and (timestamp - last_ts) < AN1_SCORE_COOLDOWN_SEC:
+            return None
+        return best_id
+
+    def _score_an1_candidate(
+        self,
+        norm_tracks: dict[int, list],
+        changer: int | None,
+        amber: list[float],
+        timestamp: float,
+    ) -> float | None:
+        """an1 원점수에 최소 이력, EMA, on-threshold, 쿨다운을 적용한다."""
+        if changer is None or self._an1_specialist is None:
+            return None
+        if len(amber) < AN1_MIN_AMBER_HISTORY:
+            return None
+        raw = self._an1_specialist.score(norm_tracks, amber)
+        if raw is None:
+            return None
+        prev = self._an1_score_ema.get(changer, raw)
+        ema = AN1_EMA_ALPHA * float(raw) + (1.0 - AN1_EMA_ALPHA) * float(prev)
+        self._an1_score_ema[changer] = ema
+        if ema < AN1_SCORE_ON_THRESHOLD:
+            return None
+        self._an1_last_score_ts[changer] = timestamp
+        return ema
+
+    @staticmethod
+    def _lat_axis(norm_tracks: dict[int, list]) -> int:
+        all_d = [np.diff(np.array([(x, y) for _, x, y in sorted(p)]), axis=0)
+                 for p in norm_tracks.values() if len(p) >= 2]
+        if not all_d:
+            return 0
+        D = np.concatenate(all_d)
+        return 0 if D[:, 0].std() < D[:, 1].std() else 1
+
+    @staticmethod
+    def _lateral_total(track_pts: list, lat_axis: int) -> float:
+        if len(track_pts) < 3:
+            return 0.0
+        xy = np.array([(x, y) for _, x, y in sorted(track_pts)])
+        return float(np.abs(np.diff(xy[:, lat_axis])).sum())
 
     def _lane_changer_id(self, norm_tracks: dict[int, list]) -> int | None:
         """횡방향 이동 최대 트랙 id (차선변경 차량)."""

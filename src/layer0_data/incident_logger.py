@@ -30,7 +30,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from track3_api_incident import ITSIncidentClient
 
-CONFIG = "/tmp/cameras_5routes.json"
+HERE = Path(__file__).resolve().parent
+CONFIG = str(HERE / "cameras_5.json")
 REC_ROOT = Path("/DATA/cctv_recording")
 LOG_DIR = REC_ROOT / "incident_matches"
 SEEN_FILE = LOG_DIR / "_seen_events.json"
@@ -81,6 +82,20 @@ def save_seen(seen: dict):
     SEEN_FILE.write_text(json.dumps(seen, ensure_ascii=False))
 
 
+def normalize_camera_config(cameras: list[dict]) -> list[dict]:
+    normalized = []
+    for i, cam in enumerate(cameras, 1):
+        item = dict(cam)
+        item["name"] = cam.get("name") or cam.get("cctv_name") or cam.get("slug") or f"camera_{i}"
+        item["x"] = cam.get("x") or cam.get("coordx") or cam.get("lon") or cam.get("lng")
+        item["y"] = cam.get("y") or cam.get("coordy") or cam.get("lat")
+        item["route"] = cam.get("route") or cam.get("cctv_road") or cam.get("hotspot_road") or ""
+        if item["x"] is None or item["y"] is None:
+            raise ValueError(f"camera {i} has no x/y or coordx/coordy")
+        normalized.append(item)
+    return normalized
+
+
 def poll_once(cams: list, client: ITSIncidentClient, seen: dict) -> int:
     """1회 폴링 → 신규 매칭 사고 로깅. 매칭 건수 반환."""
     ok, events = client.fetch_incidents_status(event_type="acc", road_type="ex")
@@ -127,7 +142,7 @@ def main():
     ap.add_argument("--interval", type=float, default=300.0)
     args = ap.parse_args()
 
-    cams = json.loads(Path(args.config).read_text())
+    cams = normalize_camera_config(json.loads(Path(args.config).read_text()))
     client = ITSIncidentClient()
     seen = load_seen()
 

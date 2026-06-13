@@ -19,8 +19,8 @@ from pathlib import Path
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
-PIPELINE_SRC = Path("/workspace/prj_cctv/pipeline/src")
-ACCIDENT_SRC = Path("/workspace/prj_cctv/사고분석_설계/src")
+PIPELINE_SRC = Path("/workspace/prj/cctv/pipeline/src")
+ACCIDENT_SRC = Path("/workspace/prj/cctv/사고분석_설계/src")
 sys.path.insert(0, str(PIPELINE_SRC))
 sys.path.insert(0, str(ACCIDENT_SRC))
 
@@ -32,6 +32,7 @@ from tracker import VehicleTracker
 from layer1_vision.speed_estimator import SpeedEstimator
 from layer1_vision.trigger_detector import TriggerDetector
 from layer1_vision.vision_pipeline import VisionPipeline
+from layer1_vision.anomaly_shadow import build_shadow_anomaly_engine
 from layer3_mllm.mllm_client import MLLMClient
 from layer2_metadata.metadata_writer import MetadataWriter
 
@@ -154,6 +155,7 @@ def run(clip_dir: Path, video_id: str, max_mllm_calls: int = 2,
         speed_est=SpeedEstimator(),
         trigger_det=TriggerDetector(),
         fps=fps,
+        anomaly_engine=build_shadow_anomaly_engine(video_id),
     )
 
     all_triggers = []

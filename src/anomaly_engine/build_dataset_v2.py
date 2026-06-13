@@ -29,7 +29,7 @@ from turn_signal_detector import amber_intensity, blink_score
 
 LBL = "/DATA/aihub_71566/labels/val_extracted"
 SRC = "/DATA/aihub_71566/source/val"
-OUT = "/workspace/prj_cctv/사고분석_설계/models/dataset_v2.npz"
+OUT = "/workspace/prj/cctv/사고분석_설계/models/dataset_v2.npz"
 
 # 비정상 유형 디렉토리 → 라벨번호
 ANOM_DIRS = {

@@ -12,11 +12,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ybs
-WorkingDirectory=/workspace/prj_cctv/사고분석_설계/src/layer0_data
+WorkingDirectory=/workspace/prj/cctv/사고분석_설계/src/layer0_data
 Environment=PYTHONUNBUFFERED=1
 # ffmpeg/ffprobe가 ~/.local/bin에 있어 systemd 최소 PATH에 추가 필수
 Environment=PATH=/home/ybs/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 record_hls_multi.py --config /tmp/cameras_5routes.json --continuous
+ExecStart=/usr/bin/python3 record_hls_multi.py --config /workspace/prj/cctv/사고분석_설계/src/layer0_data/cameras_5.json --continuous
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:/DATA/cctv_recording/record_continuous.log

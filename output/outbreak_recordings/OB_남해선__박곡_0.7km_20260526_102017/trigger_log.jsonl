@@ -1,2 +1,0 @@
-{"type": "T6", "severity": 0.5934742244815077, "description": "속도분산이상 avg=4.1km/h (hist=1.2+/-1.2)", "timestamp": 1779758417.4991097, "frame_idx": 4052958}
-{"type": "T2", "severity": 1.0, "description": "급감속 track=2 accel=-3.9m/s^2", "timestamp": 1779758420.474772, "frame_idx": 4052961}

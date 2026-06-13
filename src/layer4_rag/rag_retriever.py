@@ -138,6 +138,24 @@ class RagKnowledgeRetriever:
     def available(self) -> bool:
         return self._available
 
+    def status(self) -> dict[str, Any]:
+        """운영/헬스체크용 검색 상태.
+
+        임베딩 모델명이 있어도 쿼리 임베더가 준비되지 않으면 실제 검색은 키워드 전용이다.
+        """
+        self._ensure_cache()
+        vector_rows = int(self._vec_mask.sum()) if self._vec_mask is not None else 0
+        vector_enabled = bool(self._query_embed is not None and vector_rows > 0)
+        return {
+            "available": self._available,
+            "chunks": len(self._meta),
+            "embed_model": self._embed_model_name,
+            "vector_rows": vector_rows,
+            "vector_enabled": vector_enabled,
+            "keyword_enabled": bool(self._meta),
+            "mode": "hybrid" if vector_enabled else ("keyword" if self._meta else "unavailable"),
+        }
+
     # ── 캐시 적재 (단일 정렬 쿼리, atomic swap) ──────────────────────
     def _ensure_cache(self) -> None:
         if self._mat is not None and self._meta and (time.time() - self._cache_ts) < RAG_CACHE_TTL_SEC:
@@ -228,8 +246,11 @@ class RagKnowledgeRetriever:
         # 쿼리 임베더 (모델 정확매칭)
         embed_fn = self._make_query_embedder(model) if (mat is not None and mask is not None and mask.any()) else None
         if mat is not None and embed_fn is None:
-            logger.warning("쿼리 임베더 미구성(model=%s, provider=%s, exact=%s) → 키워드 전용",
-                           model, RAG_EMBED_PROVIDER, RAG_REQUIRE_EXACT_MODEL)
+            msg = "쿼리 임베더 미구성(model=%s, provider=%s, exact=%s) → 키워드 전용"
+            if RAG_EMBED_PROVIDER.lower() == "none":
+                logger.info(msg, model, RAG_EMBED_PROVIDER, RAG_REQUIRE_EXACT_MODEL)
+            else:
+                logger.warning(msg, model, RAG_EMBED_PROVIDER, RAG_REQUIRE_EXACT_MODEL)
 
         # atomic swap
         self._meta, self._kw_index = meta, kw_index
