@@ -27,12 +27,34 @@ CONFIG = str(HERE / "cameras_5.json")
 REC_LOG = "/DATA/cctv_recording/record_continuous.log"
 STATUS = Path("/DATA/cctv_recording/watchdog_status.json")
 REC_ROOT = Path("/DATA/cctv_recording")
+PAUSE_FILE = REC_ROOT / "pause_until.json"
 PROC_PATTERN = "record_hls_multi.py"
 DISK_PATH = "/DATA"
 DISK_CRIT_GB = 30    # 이 미만이면 위험 (녹화 곧 중단)
 DISK_WARN_GB = 100   # 이 미만이면 경고
 CAMERA_STALE_SEC = 300   # 활성 .ts가 이 시간 이상 미갱신이면 카메라 비활성 판정
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")  # 미설정 시 로그만
+
+
+def pause_until() -> datetime | None:
+    """Return the pause deadline if recording restart is temporarily disabled."""
+    if not PAUSE_FILE.exists():
+        return None
+    try:
+        data = json.loads(PAUSE_FILE.read_text(encoding="utf-8"))
+        raw_until = str(data.get("pause_until", "")).strip()
+        if not raw_until:
+            logger.warning("pause marker has no pause_until: %s", PAUSE_FILE)
+            return None
+        until = datetime.fromisoformat(raw_until)
+    except Exception as e:
+        logger.warning("pause marker read failed: %s", e)
+        return None
+
+    now = datetime.now(until.tzinfo) if until.tzinfo else datetime.now()
+    if now < until:
+        return until
+    return None
 
 
 def is_running() -> tuple[bool, int | None]:
@@ -53,13 +75,23 @@ def restart_recording() -> int | None:
     if not Path(CONFIG).exists():
         logger.error("카메라 설정 없음: %s — 재시작 불가", CONFIG)
         return None
-    cmd = (f"cd {HERE} && PYTHONUNBUFFERED=1 nohup python3 record_hls_multi.py "
-           f"--config {CONFIG} --continuous >> {REC_LOG} 2>&1 & echo $!")
     try:
-        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30)
-        pid = out.stdout.strip().split("\n")[-1]
+        log_path = Path(REC_LOG)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        with log_path.open("a", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                [sys.executable or "python3", "record_hls_multi.py", "--config", CONFIG, "--continuous"],
+                cwd=str(HERE),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        pid = str(proc.pid)
         logger.warning("녹화 재시작됨 PID=%s", pid)
-        return int(pid) if pid.isdigit() else None
+        return proc.pid
     except Exception as e:
         logger.error("녹화 재시작 실패: %s", e)
         return None
@@ -243,6 +275,17 @@ def systemd_manages() -> bool:
 
 
 def main():
+    paused_until = pause_until()
+    if paused_until:
+        running, pid = is_running()
+        free_gb, disk_state = check_disk()
+        total_cams = len(_expected_cameras())
+        action = f"paused_until_{paused_until.isoformat()}"
+        logger.warning("녹화 재시작 일시중지: %s (running=%s pid=%s)", paused_until.isoformat(), running, pid)
+        write_status(running, pid, free_gb, disk_state, action, stale_cameras=[])
+        write_metrics(running, free_gb, disk_state, total_cams, 0, 0.0)
+        return
+
     running, pid = is_running()
     action = "none"
     if not running:

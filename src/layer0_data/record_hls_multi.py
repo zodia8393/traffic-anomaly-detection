@@ -61,6 +61,7 @@ _WEB_SESSION: requests.Session | None = None
 _WEB_MARKER_CACHE = {"loaded_at": 0.0, "items": []}
 _WEB_CACHE_LOCK = threading.RLock()
 _OPENAPI_DISABLED_UNTIL = 0.0
+_ITS_WEB_VERIFY_SSL = os.getenv("ITS_WEB_VERIFY_SSL", "1").lower() not in {"0", "false", "no"}
 
 
 def _signal_handler(sig, frame):
@@ -140,6 +141,25 @@ def _meta_content(html: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _its_web_request(session: requests.Session, method: str, path: str, **kwargs) -> requests.Response:
+    """Request ITS web endpoints, retrying only known local CA failures without verify."""
+    global _ITS_WEB_VERIFY_SSL
+    url = path if path.startswith("http") else ITS_WEB_BASE + path
+    try:
+        return session.request(method, url, verify=_ITS_WEB_VERIFY_SSL, **kwargs)
+    except requests.exceptions.SSLError as e:
+        if _ITS_WEB_VERIFY_SSL and "CERTIFICATE_VERIFY_FAILED" in str(e):
+            _ITS_WEB_VERIFY_SSL = False
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+            logger.warning("ITS 웹 TLS 인증서 검증 실패 — ITS 웹 fallback만 verify=False로 재시도")
+            return session.request(method, url, verify=False, **kwargs)
+        raise
+
+
 def _its_web_session() -> requests.Session:
     global _WEB_SESSION
     if _WEB_SESSION is not None:
@@ -155,7 +175,7 @@ def _its_web_session() -> requests.Session:
         "Referer": ITS_WEB_BASE + "/",
     })
     try:
-        home = session.get(ITS_WEB_BASE + "/", timeout=30)
+        home = _its_web_request(session, "GET", "/", timeout=30)
         header = _meta_content(home.text, "_csrf_header")
         token = _meta_content(home.text, "_csrf")
         if header and token:
@@ -188,7 +208,7 @@ def _load_its_web_cctvs(force: bool = False) -> list[dict]:
         session = _its_web_session()
         payload = {"body": {"data": {"type": "CCTV"}}}
         try:
-            resp = session.post(ITS_WEB_BASE + "/map/getMarkers", data=json.dumps(payload), timeout=40)
+            resp = _its_web_request(session, "POST", "/map/getMarkers", data=json.dumps(payload), timeout=40)
         except requests.RequestException as e:
             logger.warning("ITS 웹 CCTV 마커 조회 실패: %s", type(e).__name__)
             _reset_its_web_session()
@@ -257,8 +277,10 @@ def refresh_cctv_url_from_web(cam: dict) -> str | None:
         target_url = source_url if source_url.endswith("!hls") else source_url + "!hls"
 
         try:
-            resp = session.post(
-                ITS_WEB_BASE + "/api/cctv/hls",
+            resp = _its_web_request(
+                session,
+                "POST",
+                "/api/cctv/hls",
                 data=json.dumps({"targetUrl": target_url}),
                 timeout=20,
             )
