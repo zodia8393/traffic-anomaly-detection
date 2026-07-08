@@ -28,7 +28,7 @@ from turn_signal_detector import amber_intensity, blink_score
 
 LBL = "/DATA/aihub_71566/labels/val_extracted"
 SRC = "/DATA/aihub_71566/source/val"
-OUT = "/workspace/prj/cctv/사고분석_설계/models/an1_specialist.npz"
+OUT = "/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/models/an1_specialist.npz"
 
 # an1(불이행) vs normal-01(이행) — 둘 다 차선변경
 CLASSES = [

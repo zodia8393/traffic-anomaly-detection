@@ -8,7 +8,7 @@ import os
 import sys
 
 # 루트 경로 — 환경변수로 오버라이드 가능 (배포 이식성). 미설정 시 기본값.
-ROOT = Path(os.environ.get("CCTV_PRJ_ROOT", "/workspace/prj/cctv"))
+ROOT = Path(os.environ.get("CCTV_PRJ_ROOT", "/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구"))
 NEW_ROOT = Path(os.environ.get("CCTV_ANALYSIS_ROOT", str(ROOT / "사고분석_설계")))
 
 # 기존 파이프라인 경로 추가

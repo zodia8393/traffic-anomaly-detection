@@ -34,7 +34,7 @@ def main():
     args = ap.parse_args()
 
     from ultralytics import YOLO
-    model = YOLO("/workspace/prj/cctv/사고분석_설계/src/yolov8n.pt")
+    model = YOLO("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/src/yolov8n.pt")
     det = SupervisedTrajectoryDetector()
     if not det.is_loaded:
         print("모델 미로드 — 중단"); return

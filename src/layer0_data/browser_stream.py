@@ -732,7 +732,7 @@ def _b64_to_bgr(data_url: str) -> tuple[np.ndarray | None, int, int]:
 def _test_snapshot(max_incidents: int = 3, max_per_cycle: int = 10):
     """돌발정보 페이지 1사이클 스냅샷 캡처 테스트."""
     output_dir = Path(
-        "/workspace/prj/cctv/사고분석_설계/output/outbreak_captures"
+        "/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/output/outbreak_captures"
     )
     cap = OutbreakCCTVCapture(
         target_types=("사고", "고장"),
@@ -792,7 +792,7 @@ def _test_dwelling(
     import re
 
     output_dir = Path(
-        output or "/workspace/prj/cctv/사고분석_설계/output/outbreak_dwelling"
+        output or "/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/output/outbreak_dwelling"
     )
     cap = OutbreakCCTVCapture(
         target_types=("사고", "고장"),

@@ -26,7 +26,7 @@ from sklearn.model_selection import train_test_split
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trajectory_features import FEATURE_NAMES, extract_features, parse_clip
 
-MODEL_DIR = Path("/workspace/prj/cctv/사고분석_설계/models")
+MODEL_DIR = Path("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/models")
 
 
 def load_split(data_root: str, split: str):

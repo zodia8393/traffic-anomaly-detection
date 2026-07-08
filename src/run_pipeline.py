@@ -19,8 +19,8 @@ from pathlib import Path
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
-PIPELINE_SRC = Path("/workspace/prj/cctv/pipeline/src")
-ACCIDENT_SRC = Path("/workspace/prj/cctv/사고분석_설계/src")
+PIPELINE_SRC = Path("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/pipeline/src")
+ACCIDENT_SRC = Path("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/src")
 sys.path.insert(0, str(PIPELINE_SRC))
 sys.path.insert(0, str(ACCIDENT_SRC))
 

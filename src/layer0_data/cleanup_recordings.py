@@ -4,7 +4,7 @@ record_hls_multi.py가 /DATA/cctv_recording/YYYYMMDD/ 구조로 무제한 누적
 (7.3TB ÷ ~500GB/일 ≈ 15일 만석), N일 초과 날짜 디렉토리를 삭제한다.
 
 매일 자정 cron 권장:
-  30 0 * * *  cd /workspace/prj/cctv/사고분석_설계/src/layer0_data && python3 cleanup_recordings.py
+  30 0 * * *  cd /workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/src/layer0_data && python3 cleanup_recordings.py
 
 실행:
   python cleanup_recordings.py                 # 기본 21일 보존, dry-run 아님

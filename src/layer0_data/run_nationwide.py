@@ -28,8 +28,8 @@ from typing import Any
 
 # ── 경로 설정 ────────────────────────────────────────────────────────
 _THIS_DIR = Path(__file__).resolve().parent
-PIPELINE_SRC = Path("/workspace/prj/cctv/pipeline/src")
-ACCIDENT_SRC = Path("/workspace/prj/cctv/사고분석_설계/src")
+PIPELINE_SRC = Path("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/pipeline/src")
+ACCIDENT_SRC = Path("/workspace/prj/work/AI기반 교통상황 대응 기술 개발 연구/사고분석_설계/src")
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
