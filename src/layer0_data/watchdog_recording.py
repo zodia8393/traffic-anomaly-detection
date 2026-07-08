@@ -33,6 +33,7 @@ DISK_PATH = "/DATA"
 DISK_CRIT_GB = 30    # 이 미만이면 위험 (녹화 곧 중단)
 DISK_WARN_GB = 100   # 이 미만이면 경고
 CAMERA_STALE_SEC = 300   # 활성 .ts가 이 시간 이상 미갱신이면 카메라 비활성 판정
+CAMERA_MIN_GOOD_BYTES = int(os.environ.get("CAMERA_MIN_GOOD_BYTES", str(1024 * 1024)))
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")  # 미설정 시 로그만
 
 
@@ -110,7 +111,9 @@ def check_disk() -> tuple[float, str]:
 
 
 def write_status(running: bool, pid, free_gb: float, disk_state: str, action: str,
-                 stale_cameras: list | None = None) -> None:
+                 stale_cameras: list | None = None, total_cams: int = 0,
+                 active_cams: int = 0, day_bytes: float = 0.0,
+                 zero_byte_files: int = 0) -> None:
     status = {
         "ts": datetime.now().isoformat(),
         "recording": running,
@@ -119,6 +122,10 @@ def write_status(running: bool, pid, free_gb: float, disk_state: str, action: st
         "disk_state": disk_state,
         "action": action,
         "stale_cameras": stale_cameras or [],
+        "cameras_total": total_cams,
+        "cameras_active": active_cams,
+        "day_bytes": int(day_bytes),
+        "zero_byte_files": zero_byte_files,
     }
     try:
         STATUS.write_text(json.dumps(status, ensure_ascii=False, indent=2))
@@ -146,7 +153,11 @@ def _expected_cameras() -> list[str]:
 
 
 def check_cameras() -> list[str]:
-    """설정된 카메라 중 오늘 활성 .ts 갱신이 멈춘 카메라 목록 반환."""
+    """설정된 카메라 중 오늘 유효 영상 갱신이 멈춘 카메라 목록 반환.
+
+    단순 mtime만 보면 0-byte .ts를 계속 생성하는 장애를 정상으로 오판한다.
+    따라서 최신 유효 파일(기본 1MB 이상)이 stale 기준 안에 있어야 활성으로 본다.
+    """
     import time
     today = datetime.now().strftime("%Y%m%d")
     day_dir = REC_ROOT / today
@@ -169,34 +180,42 @@ def check_cameras() -> list[str]:
             stale.append(f"{slug}(디렉토리 없음)")
             continue
         ts_files = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)
-        if not ts_files:
+        media_files = ts_files + sorted(cam_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+        if not media_files:
             stale.append(f"{slug}(파일없음)")
             continue
-        latest = ts_files[-1]
-        if now - latest.stat().st_mtime > CAMERA_STALE_SEC:
-            mins = (now - latest.stat().st_mtime) / 60
-            stale.append(f"{slug}({mins:.0f}분 미갱신)")
+        good_files = [f for f in media_files if f.stat().st_size >= CAMERA_MIN_GOOD_BYTES]
+        latest_ts = ts_files[-1] if ts_files else None
+        zero_note = ", 최신ts 0B" if latest_ts and latest_ts.stat().st_size == 0 else ""
+        if not good_files:
+            stale.append(f"{slug}(유효파일 없음{zero_note})")
+            continue
+        latest_good = max(good_files, key=lambda p: p.stat().st_mtime)
+        if now - latest_good.stat().st_mtime > CAMERA_STALE_SEC:
+            mins = (now - latest_good.stat().st_mtime) / 60
+            stale.append(f"{slug}({mins:.0f}분 유효데이터 없음{zero_note})")
     return stale
 
 
-def _count_active_cameras() -> tuple[int, int, float]:
-    """(설정 기준 전체 카메라 수, 활성 카메라 수, 오늘 누적 바이트)."""
+def _count_active_cameras() -> tuple[int, int, float, int]:
+    """(설정 기준 전체 카메라 수, 활성 카메라 수, 오늘 누적 바이트, 0-byte 파일 수)."""
     import time
     today = datetime.now().strftime("%Y%m%d")
     day_dir = REC_ROOT / today
     now = time.time()
     day_bytes = 0
+    zero_byte_files = 0
 
     expected = _expected_cameras()
     if expected:
         total = len(expected)
         active = 0
         if not day_dir.exists():
-            return total, active, 0.0
+            return total, active, 0.0, 0
         cam_dirs = [day_dir / f"{slug}_hls" for slug in expected]
     else:
         if not day_dir.exists():
-            return 0, 0, 0.0
+            return 0, 0, 0.0, 0
         total = active = 0
         cam_dirs = list(day_dir.glob("*_hls"))
 
@@ -206,15 +225,19 @@ def _count_active_cameras() -> tuple[int, int, float]:
         if not cam_dir.exists():
             continue
         files = list(cam_dir.glob("*.ts")) + list(cam_dir.glob("*.mp4"))
-        day_bytes += sum(f.stat().st_size for f in files)
-        ts = sorted(cam_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime)
-        if ts and (now - ts[-1].stat().st_mtime) <= CAMERA_STALE_SEC:
+        stats = [(f, f.stat()) for f in files]
+        day_bytes += sum(st.st_size for _, st in stats)
+        zero_byte_files += sum(1 for _, st in stats if st.st_size == 0)
+        good = [f for f, st in stats if st.st_size >= CAMERA_MIN_GOOD_BYTES]
+        latest_good = max(good, key=lambda p: p.stat().st_mtime) if good else None
+        if latest_good and (now - latest_good.stat().st_mtime) <= CAMERA_STALE_SEC:
             active += 1
-    return total, active, float(day_bytes)
+    return total, active, float(day_bytes), zero_byte_files
 
 
 def write_metrics(running: bool, free_gb: float, disk_state: str,
-                  total_cams: int, active_cams: int, day_bytes: float) -> None:
+                  total_cams: int, active_cams: int, day_bytes: float,
+                  zero_byte_files: int, stale_cameras: list[str]) -> None:
     """node_exporter textfile collector 형식(.prom)으로 메트릭 출력.
 
     METRICS_DIR(기본 /DATA/cctv_recording/metrics)에 cctv_recording.prom 기록.
@@ -241,6 +264,12 @@ def write_metrics(running: bool, free_gb: float, disk_state: str,
         "# HELP cctv_recording_day_bytes 오늘 누적 녹화 바이트",
         "# TYPE cctv_recording_day_bytes gauge",
         f"cctv_recording_day_bytes {day_bytes:.0f}",
+        "# HELP cctv_recording_zero_byte_files_today 오늘 0-byte 영상 파일 수",
+        "# TYPE cctv_recording_zero_byte_files_today gauge",
+        f"cctv_recording_zero_byte_files_today {zero_byte_files}",
+        "# HELP cctv_recording_stale_cameras 비활성/유효데이터 미갱신 카메라 수",
+        "# TYPE cctv_recording_stale_cameras gauge",
+        f"cctv_recording_stale_cameras {len(stale_cameras)}",
     ]
     try:
         metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -279,11 +308,18 @@ def main():
     if paused_until:
         running, pid = is_running()
         free_gb, disk_state = check_disk()
-        total_cams = len(_expected_cameras())
+        total_cams, active_cams, day_bytes, zero_byte_files = _count_active_cameras()
         action = f"paused_until_{paused_until.isoformat()}"
         logger.warning("녹화 재시작 일시중지: %s (running=%s pid=%s)", paused_until.isoformat(), running, pid)
-        write_status(running, pid, free_gb, disk_state, action, stale_cameras=[])
-        write_metrics(running, free_gb, disk_state, total_cams, 0, 0.0)
+        write_status(
+            running, pid, free_gb, disk_state, action, stale_cameras=[],
+            total_cams=total_cams, active_cams=active_cams,
+            day_bytes=day_bytes, zero_byte_files=zero_byte_files,
+        )
+        write_metrics(
+            running, free_gb, disk_state, total_cams, active_cams,
+            day_bytes, zero_byte_files, [],
+        )
         return
 
     running, pid = is_running()
@@ -303,9 +339,16 @@ def main():
 
     free_gb, disk_state = check_disk()
     stale = check_cameras()
-    total_cams, active_cams, day_bytes = _count_active_cameras()
-    write_status(running, pid, free_gb, disk_state, action, stale_cameras=stale)
-    write_metrics(running, free_gb, disk_state, total_cams, active_cams, day_bytes)
+    total_cams, active_cams, day_bytes, zero_byte_files = _count_active_cameras()
+    write_status(
+        running, pid, free_gb, disk_state, action, stale_cameras=stale,
+        total_cams=total_cams, active_cams=active_cams,
+        day_bytes=day_bytes, zero_byte_files=zero_byte_files,
+    )
+    write_metrics(
+        running, free_gb, disk_state, total_cams, active_cams,
+        day_bytes, zero_byte_files, stale,
+    )
 
     # 알림 조건: 재시작 실패 / 디스크 위험 / 비활성 카메라
     if action == "restart_failed":
