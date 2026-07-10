@@ -6,6 +6,7 @@ cron-watchdog's daily completion check. It is read-only against recording data.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 from dataclasses import dataclass
@@ -155,7 +156,18 @@ def render_report(now: datetime, reports: list[CameraReport]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="CCTV 일일 영상확보 현황 보고서 생성")
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="보고서 파일을 쓰지 않고 표준출력으로만 표시",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     now = datetime.now()
     day_dir = REC_ROOT / now.strftime("%Y%m%d")
     cameras = expected_cameras()
@@ -165,6 +177,10 @@ def main() -> int:
     now_ts = now.timestamp()
     reports = [scan_camera(day_dir, camera, now_ts) for camera in cameras]
     text = render_report(now, reports)
+
+    if args.stdout:
+        print(text, end="")
+        return 0
 
     outputs = [
         PROJECT_LOG_DIR / f"cctv-recording-status-{now.strftime('%Y%m%d')}.md",
